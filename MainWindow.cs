@@ -80,7 +80,7 @@ public sealed class MainWindow : Window
 
     private string _outputFormat = "MP4";
     private string _mp4Quality = "1080P";
-    private bool _includeSubtitles = true;
+    private bool _includeSubtitles = false;
     private string _activeNav = "home";
     private int _todayDownloads;
     private string _lastSpeed = "-";
@@ -89,12 +89,22 @@ public sealed class MainWindow : Window
     private DownloadItemView? _activeDownload;
     private string? _lastMediaOutputPath;
 
+    // UI update throttling — high-frequency yt-dlp output previously flooded the UI thread
+    // and froze/crashed the app during download.
+    private readonly object _logLock = new();
+    private readonly StringBuilder _pendingLogChunk = new();
+    private bool _logFlushScheduled;
+    private DateTime _lastProgressUiUtc = DateTime.MinValue;
+    private DateTime _lastFooterUiUtc = DateTime.MinValue;
+    private const int MaxLogCharacters = 180_000;
+    private const int ProgressUiIntervalMs = 250;
+
     public MainWindow()
     {
         var settings = AppSettings.Load();
         _outputFormat = settings.OutputFormat;
         _mp4Quality = NormalizeMp4Quality(settings.Mp4Quality);
-        _includeSubtitles = settings.IncludeSubtitles ?? true;
+        _includeSubtitles = settings.IncludeSubtitles ?? false;
         _todayDownloads = settings.TodayDownloadCount;
         if (settings.TodayDate != DateOnly.FromDateTime(DateTime.Now))
         {
@@ -1596,8 +1606,17 @@ public sealed class MainWindow : Window
                         item.Format,
                         _conversionTokenSource.Token,
                         item);
-                    PairSubtitlesWithMedia(outputPath, _lastMediaOutputPath, item.Format, ffmpegPath);
+
+                    // Run pairing/embed off the UI thread so ffmpeg WaitForExit cannot freeze the window.
+                    var mediaHint = _lastMediaOutputPath;
+                    var format = item.Format;
+                    await Task.Run(
+                        () => PairSubtitlesWithMedia(outputPath, mediaHint, format, ffmpegPath),
+                        _conversionTokenSource.Token);
                 }
+
+                // Flush any buffered log lines after each item.
+                FlushLogToUi(force: true);
 
                 if (code == 0)
                 {
@@ -1641,6 +1660,7 @@ public sealed class MainWindow : Window
         }
         finally
         {
+            FlushLogToUi(force: true);
             _activeDownload = null;
             _conversionTokenSource?.Dispose();
             _conversionTokenSource = null;
@@ -2053,14 +2073,18 @@ public sealed class MainWindow : Window
                 File.Delete(tempPath);
             }
 
+            // Do NOT redirect stdout/stderr — full buffers + WaitForExit deadlocks easily.
             var startInfo = new ProcessStartInfo
             {
                 FileName = ffmpegPath,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
                 UseShellExecute = false,
-                CreateNoWindow = true
+                CreateNoWindow = true,
+                RedirectStandardOutput = false,
+                RedirectStandardError = false
             };
+            startInfo.ArgumentList.Add("-hide_banner");
+            startInfo.ArgumentList.Add("-loglevel");
+            startInfo.ArgumentList.Add("error");
             startInfo.ArgumentList.Add("-y");
             startInfo.ArgumentList.Add("-i");
             startInfo.ArgumentList.Add(mediaPath);
@@ -2084,7 +2108,26 @@ public sealed class MainWindow : Window
                 return false;
             }
 
-            process.WaitForExit(120_000);
+            if (!process.WaitForExit(180_000))
+            {
+                try
+                {
+                    process.Kill(entireProcessTree: true);
+                }
+                catch
+                {
+                    // ignore kill failures
+                }
+
+                if (File.Exists(tempPath))
+                {
+                    File.Delete(tempPath);
+                }
+
+                AppendLog("ffmpeg embed: timed out");
+                return false;
+            }
+
             if (process.ExitCode != 0 || !File.Exists(tempPath))
             {
                 if (File.Exists(tempPath))
@@ -2095,8 +2138,35 @@ public sealed class MainWindow : Window
                 return false;
             }
 
-            File.Delete(mediaPath);
-            File.Move(tempPath, mediaPath);
+            // Replace original only after a successful embed write.
+            var backupPath = mediaPath + ".bak";
+            try
+            {
+                if (File.Exists(backupPath))
+                {
+                    File.Delete(backupPath);
+                }
+
+                File.Move(mediaPath, backupPath);
+                File.Move(tempPath, mediaPath);
+                File.Delete(backupPath);
+            }
+            catch
+            {
+                // Roll back if replace fails.
+                if (!File.Exists(mediaPath) && File.Exists(backupPath))
+                {
+                    File.Move(backupPath, mediaPath);
+                }
+
+                if (File.Exists(tempPath))
+                {
+                    File.Delete(tempPath);
+                }
+
+                throw;
+            }
+
             return true;
         }
         catch (Exception ex)
@@ -2402,12 +2472,25 @@ public sealed class MainWindow : Window
 
     private async Task ReadProcessStreamAsync(Stream stream, CancellationToken token, DownloadItemView? item)
     {
-        var buffer = new byte[4096];
-        var pending = new List<byte>();
+        var buffer = new byte[8192];
+        var pending = new List<byte>(1024);
 
         while (true)
         {
-            var read = await stream.ReadAsync(buffer.AsMemory(0, buffer.Length), token);
+            int read;
+            try
+            {
+                read = await stream.ReadAsync(buffer.AsMemory(0, buffer.Length), token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+            catch (IOException)
+            {
+                break;
+            }
+
             if (read == 0)
             {
                 break;
@@ -2423,7 +2506,11 @@ public sealed class MainWindow : Window
                     continue;
                 }
 
-                pending.Add(value);
+                // Cap runaway line length (binary noise / missing newlines).
+                if (pending.Count < 32_768)
+                {
+                    pending.Add(value);
+                }
             }
         }
 
@@ -2443,9 +2530,17 @@ public sealed class MainWindow : Window
         }
 
         var line = DecodeProcessText(bytes.ToArray());
+        TryCaptureMediaPath(line);
+
+        // Progress lines fire many times per second — update bar only, do not flood the log.
+        if (ProgressRegex.IsMatch(line))
+        {
+            TryUpdateProgress(line, item);
+            return;
+        }
+
         AppendLog(line);
         TryUpdateProgress(line, item);
-        TryCaptureMediaPath(line);
 
         if (line.Contains("HTTP Error 412", StringComparison.OrdinalIgnoreCase)
             || line.Contains("Precondition Failed", StringComparison.OrdinalIgnoreCase))
@@ -2500,6 +2595,14 @@ public sealed class MainWindow : Window
 
         var speed = match.Groups["speed"].Value;
         _lastSpeed = speed;
+
+        var now = DateTime.UtcNow;
+        if ((now - _lastProgressUiUtc).TotalMilliseconds < ProgressUiIntervalMs && percent < 99.5)
+        {
+            return;
+        }
+
+        _lastProgressUiUtc = now;
         UpdateFooter();
         item?.SetProgress(percent, $"{percent:0.#}%  ({speed})");
     }
@@ -2654,11 +2757,27 @@ public sealed class MainWindow : Window
     private string BuildFooterStats() =>
         $"\u4eca\u65e5\u4e0b\u8f09\uff1a{_todayDownloads} \u500b\u6a94\u6848    \u901f\u5ea6\uff1a{_lastSpeed}";
 
-    private void UpdateFooter() =>
-        Dispatcher.UIThread.Post(() => _footerStats.Text = BuildFooterStats());
+    private void UpdateFooter()
+    {
+        var now = DateTime.UtcNow;
+        if ((now - _lastFooterUiUtc).TotalMilliseconds < ProgressUiIntervalMs)
+        {
+            return;
+        }
+
+        _lastFooterUiUtc = now;
+        var text = BuildFooterStats();
+        Dispatcher.UIThread.Post(() =>
+        {
+            if (_footerStats.Text != text)
+            {
+                _footerStats.Text = text;
+            }
+        }, DispatcherPriority.Background);
+    }
 
     private void SetStatus(string text) =>
-        Dispatcher.UIThread.Post(() => _statusText.Text = text);
+        Dispatcher.UIThread.Post(() => _statusText.Text = text, DispatcherPriority.Normal);
 
     private void AppendLog(string? line)
     {
@@ -2667,11 +2786,75 @@ public sealed class MainWindow : Window
             return;
         }
 
-        Dispatcher.UIThread.Post(() =>
+        lock (_logLock)
         {
-            _logText.Text += $"{line}{Environment.NewLine}";
-            _logText.CaretIndex = _logText.Text?.Length ?? 0;
-        });
+            _pendingLogChunk.AppendLine(line);
+            if (_logFlushScheduled)
+            {
+                return;
+            }
+
+            _logFlushScheduled = true;
+        }
+
+        // Batch many log lines into one UI update to keep the window responsive.
+        Dispatcher.UIThread.Post(() => FlushLogToUi(force: false), DispatcherPriority.Background);
+    }
+
+    private void FlushLogToUi(bool force)
+    {
+        string chunk;
+        lock (_logLock)
+        {
+            if (_pendingLogChunk.Length == 0)
+            {
+                if (force)
+                {
+                    _logFlushScheduled = false;
+                }
+
+                return;
+            }
+
+            chunk = _pendingLogChunk.ToString();
+            _pendingLogChunk.Clear();
+            _logFlushScheduled = false;
+        }
+
+        void Apply()
+        {
+            try
+            {
+                var current = _logText.Text ?? "";
+                var combined = current + chunk;
+                if (combined.Length > MaxLogCharacters)
+                {
+                    combined = combined[^MaxLogCharacters..];
+                    // Avoid cutting mid-line when possible.
+                    var firstNl = combined.IndexOf('\n');
+                    if (firstNl >= 0 && firstNl < combined.Length - 1)
+                    {
+                        combined = combined[(firstNl + 1)..];
+                    }
+                }
+
+                _logText.Text = combined;
+                // Avoid CaretIndex thrash (was a major freeze source on large logs).
+            }
+            catch
+            {
+                // Never let log UI updates crash conversion.
+            }
+        }
+
+        if (Dispatcher.UIThread.CheckAccess())
+        {
+            Apply();
+        }
+        else
+        {
+            Dispatcher.UIThread.Post(Apply, DispatcherPriority.Background);
+        }
     }
 
     private sealed record NavItem(string Id, Border Border);
@@ -2842,16 +3025,23 @@ public sealed class MainWindow : Window
             State = state;
             Dispatcher.UIThread.Post(() =>
             {
-                (_stateBadge.Text, _stateBadge.Foreground) = state switch
+                try
                 {
-                    DownloadState.Running => ("\u4e0b\u8f09\u4e2d", Blue),
-                    DownloadState.Completed => ("\u5b8c\u6210", Green),
-                    DownloadState.Failed => ("\u5931\u6557", Brush.Parse("#EF4444")),
-                    DownloadState.Cancelled => ("\u53d6\u6d88", TextMuted),
-                    DownloadState.Paused => ("\u66ab\u505c", Brush.Parse("#F59E0B")),
-                    _ => ("\u6392\u968a", Blue)
-                };
-            });
+                    (_stateBadge.Text, _stateBadge.Foreground) = state switch
+                    {
+                        DownloadState.Running => ("\u4e0b\u8f09\u4e2d", Blue),
+                        DownloadState.Completed => ("\u5b8c\u6210", Green),
+                        DownloadState.Failed => ("\u5931\u6557", Brush.Parse("#EF4444")),
+                        DownloadState.Cancelled => ("\u53d6\u6d88", TextMuted),
+                        DownloadState.Paused => ("\u66ab\u505c", Brush.Parse("#F59E0B")),
+                        _ => ("\u6392\u968a", Blue)
+                    };
+                }
+                catch
+                {
+                    // ignore UI update races after window close
+                }
+            }, DispatcherPriority.Background);
         }
 
         public void SetProgress(double percent, string label)
@@ -2859,9 +3049,19 @@ public sealed class MainWindow : Window
             Progress = Math.Clamp(percent, 0, 100);
             Dispatcher.UIThread.Post(() =>
             {
-                _bar.Value = Progress;
-                _progressText.Text = label;
-            });
+                try
+                {
+                    if (Math.Abs(_bar.Value - Progress) >= 0.2 || _progressText.Text != label)
+                    {
+                        _bar.Value = Progress;
+                        _progressText.Text = label;
+                    }
+                }
+                catch
+                {
+                    // ignore UI update races after window close
+                }
+            }, DispatcherPriority.Background);
         }
     }
 }
@@ -2883,7 +3083,7 @@ internal sealed class AppSettings
     public int UrlInputCount { get; init; } = 1;
     public string OutputFormat { get; init; } = "MP4";
     public string Mp4Quality { get; init; } = "1080P";
-    public bool? IncludeSubtitles { get; init; } = true;
+    public bool? IncludeSubtitles { get; init; } = false;
     public int TodayDownloadCount { get; init; }
     public DateOnly TodayDate { get; init; } = DateOnly.FromDateTime(DateTime.Now);
 
@@ -2906,8 +3106,8 @@ internal sealed class AppSettings
                         UrlInputCount = settings.UrlInputCount is 1 or 3 or 7 ? settings.UrlInputCount : 1,
                         OutputFormat = string.Equals(settings.OutputFormat, "MP3", StringComparison.OrdinalIgnoreCase) ? "MP3" : "MP4",
                         Mp4Quality = NormalizeQuality(settings.Mp4Quality),
-                        // Missing property in older settings.json => keep default enabled.
-                        IncludeSubtitles = settings.IncludeSubtitles ?? true,
+                        // Missing property in older settings.json => default off.
+                        IncludeSubtitles = settings.IncludeSubtitles ?? false,
                         TodayDownloadCount = settings.TodayDate == today ? settings.TodayDownloadCount : 0,
                         TodayDate = today
                     };
@@ -2929,7 +3129,7 @@ internal sealed class AppSettings
         string mp4Quality,
         int todayDownloadCount = 0,
         DateOnly? todayDate = null,
-        bool includeSubtitles = true)
+        bool includeSubtitles = false)
     {
         try
         {
