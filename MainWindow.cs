@@ -3,340 +3,1321 @@ using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Primitives;
+using Avalonia.Controls.Shapes;
+using Avalonia.Input;
+using Avalonia.Input.Platform;
 using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
+using IoPath = System.IO.Path;
 
 namespace YoutubeOrBilibiliMP3Converter;
 
 public sealed class MainWindow : Window
 {
-    private static readonly int[] UrlInputCountOptions = [1, 3, 7];
-    private static readonly string[] OutputFormatOptions = ["MP3", "MP4"];
-    private static readonly string[] Mp4QualityOptions = ["1080p", "4K"];
+    private static readonly string[] Mp4QualityOptions = ["480P", "720P", "1080P", "4K"];
     private static readonly Encoding Utf8Strict = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
     private static readonly Encoding SystemAnsiEncoding = GetSystemAnsiEncoding();
+    private static readonly Regex ProgressRegex = new(
+        @"\[download\]\s+(?<percent>\d+(?:\.\d+)?)%.*?at\s+(?<speed>\S+)",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    private static readonly Regex DestinationRegex = new(
+        @"(?:Destination:\s+|Merging formats into "")(?<path>.+?)(?:""|$)",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    private static readonly string[] PreferredSubLangTokens =
+    [
+        "zh-Hant", "zh-TW", "zh-HK", "zh-Hans", "zh-CN", "zh", "en"
+    ];
 
-    private readonly TextBox[] _urlBoxes;
-    private readonly ComboBox _urlInputCountComboBox;
-    private readonly ComboBox _outputFormatComboBox;
-    private readonly ComboBox _mp4QualityComboBox;
+    private static readonly IBrush BgApp = Brush.Parse("#EEF4FB");
+    private static readonly IBrush BgSidebar = Brush.Parse("#F5F9FF");
+    private static readonly IBrush BgCard = Brush.Parse("#FFFFFF");
+    private static readonly IBrush BorderSoft = Brush.Parse("#D7E4F5");
+    private static readonly IBrush TextPrimary = Brush.Parse("#1A2332");
+    private static readonly IBrush TextSecondary = Brush.Parse("#5B6B7C");
+    private static readonly IBrush TextMuted = Brush.Parse("#8A97A8");
+    private static readonly IBrush Blue = Brush.Parse("#2F7BFF");
+    private static readonly IBrush BlueSoft = Brush.Parse("#E8F1FF");
+    private static readonly IBrush Green = Brush.Parse("#22C55E");
+    private static readonly IBrush GreenSoft = Brush.Parse("#E8F9EE");
+    private static readonly IBrush RedYouTube = Brush.Parse("#FF0000");
+    private static readonly IBrush PinkBili = Brush.Parse("#FB7299");
+    private static readonly IBrush PinkBiliSoft = Brush.Parse("#FFE8F0");
+
+    private readonly List<NavItem> _navItems = [];
+    private readonly List<DownloadItemView> _downloadItems = [];
+    private readonly StackPanel _downloadListPanel;
+    private readonly StackPanel _mainHost;
+    private readonly TextBox _urlBox;
     private readonly TextBox _outputBox;
-    private readonly Button _chooseFolderButton;
-    private readonly Button _clearUrlsButton;
+    private readonly ComboBox _qualityCombo;
+    private readonly Button _parseButton;
     private readonly Button _convertButton;
+    private readonly Button _pasteButton;
+    private readonly Button _browseButton;
+    private readonly Button _clearQueueButton;
+    private readonly Border _mp4Card;
+    private readonly Border _mp3Card;
+    private readonly Border _previewCard;
+    private readonly TextBlock _previewTitle;
+    private readonly TextBlock _previewDuration;
+    private readonly TextBlock _previewViews;
+    private readonly TextBlock _previewDate;
+    private readonly TextBlock _previewStatus;
+    private readonly TextBlock _queueCountText;
     private readonly TextBlock _statusText;
-    private readonly TextBlock _logText;
-    private readonly ScrollViewer _logScrollViewer;
-    private readonly Border _logSurface;
-    private readonly ProgressBar _progressBar;
+    private readonly TextBlock _footerStats;
+    private readonly TextBox _logText;
+    private readonly Ellipse _mp4Radio;
+    private readonly Ellipse _mp3Radio;
+    private readonly CheckBox _subtitleCheckBox;
 
-    private int _urlInputCount;
-    private string _outputFormat;
-    private string _mp4Quality;
+    private string _outputFormat = "MP4";
+    private string _mp4Quality = "1080P";
+    private bool _includeSubtitles = true;
+    private string _activeNav = "home";
+    private int _todayDownloads;
+    private string _lastSpeed = "-";
+    private ParsedVideoInfo? _parsedInfo;
     private CancellationTokenSource? _conversionTokenSource;
+    private DownloadItemView? _activeDownload;
+    private string? _lastMediaOutputPath;
 
     public MainWindow()
     {
         var settings = AppSettings.Load();
-
-        Title = "YouTube / Bilibili to MP3 Converter";
-        Width = 820;
-        Height = 720;
-        MinWidth = 680;
-        MinHeight = 640;
-        Background = Brush.Parse("#EEF2F6");
-        _urlInputCount = settings.UrlInputCount;
         _outputFormat = settings.OutputFormat;
-        _mp4Quality = settings.Mp4Quality;
-
-        _urlBoxes = Enumerable.Range(1, UrlInputCountOptions.Max())
-            .Select(index => CreateUrlBox($"網址 {index}"))
-            .ToArray();
-
-        _urlInputCountComboBox = new ComboBox
+        _mp4Quality = NormalizeMp4Quality(settings.Mp4Quality);
+        _includeSubtitles = settings.IncludeSubtitles ?? true;
+        _todayDownloads = settings.TodayDownloadCount;
+        if (settings.TodayDate != DateOnly.FromDateTime(DateTime.Now))
         {
-            ItemsSource = UrlInputCountOptions,
-            SelectedItem = _urlInputCount,
-            MinWidth = 96,
-            MinHeight = 34
-        };
-        _urlInputCountComboBox.SelectionChanged += UrlInputCountChanged;
+            _todayDownloads = 0;
+        }
 
-        _outputFormatComboBox = new ComboBox
-        {
-            ItemsSource = OutputFormatOptions,
-            SelectedItem = _outputFormat,
-            MinWidth = 96,
-            MinHeight = 34
-        };
-        _outputFormatComboBox.SelectionChanged += OutputFormatChanged;
+        Title = "\u5f71\u97f3\u8f49\u63db\u5927\u5e2b v1.0";
+        Width = 1180;
+        Height = 780;
+        MinWidth = 980;
+        MinHeight = 680;
+        Background = BgApp;
+        FontFamily = new FontFamily("Microsoft JhengHei UI, Segoe UI, Inter, sans-serif");
 
-        _mp4QualityComboBox = new ComboBox
+        _urlBox = CreateInputBox("https://www.youtube.com/watch?v=... \u6216 Bilibili \u5f71\u7247\u7db2\u5740");
+        _outputBox = CreateInputBox("\u9078\u64c7\u8f38\u51fa\u8cc7\u6599\u593e");
+        _outputBox.Text = settings.LastOutputFolder;
+        _outputBox.LostFocus += (_, _) => SaveSettingsIfPossible();
+
+        _qualityCombo = new ComboBox
         {
             ItemsSource = Mp4QualityOptions,
             SelectedItem = _mp4Quality,
-            MinWidth = 96,
-            MinHeight = 34
+            MinWidth = 120,
+            MinHeight = 34,
+            FontSize = 13
         };
-        _mp4QualityComboBox.SelectionChanged += Mp4QualityChanged;
-
-        _outputBox = new TextBox
+        _qualityCombo.SelectionChanged += (_, _) =>
         {
-            Text = settings.LastOutputFolder,
-            IsReadOnly = false,
-            FontSize = 14,
-            MinHeight = 38
+            if (_qualityCombo.SelectedItem is string q)
+            {
+                _mp4Quality = NormalizeMp4Quality(q);
+                SaveSettingsIfPossible();
+            }
         };
-        _outputBox.LostFocus += (_, _) => SaveOutputFolderIfValid();
 
-        _chooseFolderButton = new Button
-        {
-            Content = "選擇資料夾",
-            MinWidth = 112,
-            MinHeight = 38
-        };
-        _chooseFolderButton.Click += ChooseFolderAsync;
+        _pasteButton = CreateSoftButton("\u8cbc\u4e0a", 88);
+        _pasteButton.Click += PasteUrlAsync;
 
-        _clearUrlsButton = new Button
-        {
-            Content = "清除網址",
-            MinWidth = 112,
-            MinHeight = 42,
-            HorizontalAlignment = HorizontalAlignment.Right
-        };
-        _clearUrlsButton.Click += ClearUrls;
+        _parseButton = CreatePrimaryButton("\u89e3\u6790\u7db2\u5740", 140);
+        _parseButton.Click += ParseUrlAsync;
+
+        _browseButton = CreateSoftButton("\u700f\u89bd", 88);
+        _browseButton.Click += ChooseFolderAsync;
 
         _convertButton = new Button
         {
-            Content = "轉換",
-            MinWidth = 128,
-            MinHeight = 42,
-            HorizontalAlignment = HorizontalAlignment.Right
+            Content = "\u958b\u59cb\u8f49\u63db",
+            MinHeight = 48,
+            FontSize = 16,
+            FontWeight = FontWeight.SemiBold,
+            Foreground = Brushes.White,
+            Background = Green,
+            CornerRadius = new CornerRadius(12),
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            Cursor = new Cursor(StandardCursorType.Hand),
+            Padding = new Thickness(16, 10)
         };
         _convertButton.Click += ConvertOrCancelAsync;
 
-        _statusText = new TextBlock
+        _clearQueueButton = CreateIconTextButton("\u6e05\u7a7a");
+        _clearQueueButton.Click += (_, _) =>
         {
-            Text = "準備就緒",
-            FontSize = 14,
-            Foreground = Brush.Parse("#394150"),
+            if (_conversionTokenSource is not null)
+            {
+                return;
+            }
+
+            _downloadItems.Clear();
+            RebuildDownloadList();
+            SetStatus("\u4e0b\u8f09\u6e05\u55ae\u5df2\u6e05\u7a7a");
+        };
+
+        _mp4Radio = CreateRadioDot(true);
+        _mp3Radio = CreateRadioDot(false);
+        _mp4Card = CreateFormatCard("MP4", Blue, BlueSoft, _mp4Radio, true);
+        _mp3Card = CreateFormatCard("MP3", Green, GreenSoft, _mp3Radio, false);
+        _mp4Card.PointerPressed += (_, _) => SetOutputFormat("MP4");
+        _mp3Card.PointerPressed += (_, _) => SetOutputFormat("MP3");
+
+        _subtitleCheckBox = new CheckBox
+        {
+            Content = "\u642d\u914d\u5b57\u5e55\uff08\u5916\u639b .srt\uff0cMP4 \u4e26\u5167\u5d4c\uff1bMP3 \u4e26\u751f\u6210 .lrc\uff09",
+            IsChecked = _includeSubtitles,
+            FontSize = 13,
+            Foreground = TextPrimary,
+            Margin = new Thickness(0, 2, 0, 0)
+        };
+        _subtitleCheckBox.IsCheckedChanged += (_, _) =>
+        {
+            _includeSubtitles = _subtitleCheckBox.IsChecked == true;
+            SaveSettingsIfPossible();
+            SetStatus(_includeSubtitles
+                ? "\u5df2\u958b\u555f\u5b57\u5e55\u642d\u914d\uff1a\u6703\u4e0b\u8f09\u4e26\u5c0d\u9f4a\u5f71\u97f3\u6a94"
+                : "\u5df2\u95dc\u9589\u5b57\u5e55\u642d\u914d");
+        };
+
+        _previewTitle = new TextBlock
+        {
+            Text = "\u5c1a\u672a\u89e3\u6790\u5f71\u7247",
+            FontSize = 15,
+            FontWeight = FontWeight.SemiBold,
+            Foreground = TextPrimary,
+            TextWrapping = TextWrapping.Wrap,
+            MaxLines = 2
+        };
+        _previewDuration = MetaLine("\u6642\u9577", "-");
+        _previewViews = MetaLine("\u6b21\u6578", "-");
+        _previewDate = MetaLine("\u65e5\u671f", "-");
+        _previewStatus = new TextBlock
+        {
+            Text = "\u7b49\u5f85\u89e3\u6790",
+            FontSize = 12,
+            Foreground = TextMuted,
             VerticalAlignment = VerticalAlignment.Center
         };
 
-        _progressBar = new ProgressBar
+        _previewCard = BuildPreviewCard();
+        _queueCountText = new TextBlock
         {
-            IsIndeterminate = false,
-            Height = 6,
-            Minimum = 0,
-            Maximum = 100
+            Text = "\u4e0b\u8f09\u6e05\u55ae (0)",
+            FontSize = 14,
+            FontWeight = FontWeight.SemiBold,
+            Foreground = TextPrimary,
+            VerticalAlignment = VerticalAlignment.Center
         };
-
-        _logText = new TextBlock
+        _statusText = new TextBlock
         {
+            Text = "\u6e96\u5099\u5c31\u7dd2",
+            FontSize = 13,
+            Foreground = TextSecondary,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        _footerStats = new TextBlock
+        {
+            Text = BuildFooterStats(),
+            FontSize = 12,
+            Foreground = TextMuted,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        _logText = new TextBox
+        {
+            Text = "",
+            IsReadOnly = true,
+            AcceptsReturn = true,
             TextWrapping = TextWrapping.Wrap,
             FontFamily = new FontFamily("Consolas, Microsoft JhengHei UI, monospace"),
-            FontSize = 12,
-            Foreground = Brush.Parse("#F9FAFB"),
-            LineHeight = 16
+            FontSize = 11,
+            Foreground = Brush.Parse("#D1D5DB"),
+            Background = Brushes.Transparent,
+            BorderThickness = new Thickness(0),
+            CaretBrush = Brush.Parse("#D1D5DB"),
+            SelectionBrush = Brush.Parse("#3B82F6"),
+            MinHeight = 100
         };
-        _logScrollViewer = new ScrollViewer
-        {
-            Content = _logText,
-            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled
-        };
-        _logSurface = new Border
-        {
-            Background = Brush.Parse("#111827"),
-            BorderBrush = Brush.Parse("#273449"),
-            BorderThickness = new Thickness(1),
-            CornerRadius = new CornerRadius(6),
-            Padding = new Thickness(14),
-            MinHeight = 170,
-            Child = _logScrollViewer
-        };
+        _downloadListPanel = new StackPanel { Spacing = 10 };
+        _mainHost = new StackPanel { Spacing = 14 };
 
-        Content = new ScrollViewer
-        {
-            Content = BuildLayout(),
-            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled
-        };
-        UpdateUrlBoxVisibility();
-        UpdateMp4QualityVisibility();
-        UpdateConvertButtonText();
+        Content = BuildShell();
+        SetOutputFormat(_outputFormat);
         Opened += (_, _) => CheckTools();
     }
 
-    private Control BuildLayout()
+    private Control BuildShell()
     {
-        var root = new StackPanel
+        var root = new Grid
         {
-            Margin = new Thickness(26, 24)
+            RowDefinitions = new RowDefinitions("*,Auto"),
+            ColumnDefinitions = new ColumnDefinitions("200,*")
         };
 
-        var header = new StackPanel
+        var sidebar = BuildSidebar();
+        Grid.SetRowSpan(sidebar, 2);
+        root.Children.Add(sidebar);
+
+        var main = new Border
         {
-            Spacing = 6,
-            Margin = new Thickness(0, 0, 0, 18)
+            Background = BgApp,
+            Padding = new Thickness(22, 18, 22, 12),
+            Child = new ScrollViewer
+            {
+                Content = _mainHost,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled
+            }
         };
-        header.Children.Add(new TextBlock
+        Grid.SetColumn(main, 1);
+        root.Children.Add(main);
+
+        var footer = BuildFooter();
+        Grid.SetRow(footer, 1);
+        Grid.SetColumn(footer, 1);
+        root.Children.Add(footer);
+
+        ShowHomePage();
+        return root;
+    }
+
+    private Control BuildSidebar()
+    {
+        var panel = new Border
         {
-            Text = "YouTube / Bilibili to MP3 Converter",
-            FontSize = 28,
-            FontWeight = FontWeight.SemiBold,
-            Foreground = Brush.Parse("#111827")
+            Background = BgSidebar,
+            BorderBrush = BorderSoft,
+            BorderThickness = new Thickness(0, 0, 1, 0),
+            Padding = new Thickness(14, 18, 14, 16)
+        };
+
+        var stack = new StackPanel { Spacing = 8 };
+
+        var brand = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 10,
+            Margin = new Thickness(4, 0, 0, 18)
+        };
+        brand.Children.Add(new Border
+        {
+            Width = 34,
+            Height = 34,
+            CornerRadius = new CornerRadius(10),
+            Background = RedYouTube,
+            Child = new TextBlock
+            {
+                Text = ">",
+                FontSize = 16,
+                FontWeight = FontWeight.Bold,
+                Foreground = Brushes.White,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center
+            }
         });
-        header.Children.Add(new TextBlock
+        var brandText = new StackPanel { Spacing = 0, VerticalAlignment = VerticalAlignment.Center };
+        brandText.Children.Add(new TextBlock
         {
-            Text = "貼上 YouTube 或 Bilibili 連結，選擇輸出資料夾後轉換成 MP3 或 MP4。",
+            Text = "\u5f71\u97f3\u8f49\u63db\u5927\u5e2b",
             FontSize = 14,
-            Foreground = Brush.Parse("#5F6877")
+            FontWeight = FontWeight.Bold,
+            Foreground = TextPrimary
         });
-
-        root.Children.Add(header);
-
-        var body = new Grid
+        brandText.Children.Add(new TextBlock
         {
-            RowDefinitions = new RowDefinitions("Auto,Auto,Auto,Auto,Auto,Auto"),
-            RowSpacing = 14
+            Text = "v1.0",
+            FontSize = 11,
+            Foreground = TextMuted
+        });
+        brand.Children.Add(brandText);
+        stack.Children.Add(brand);
+
+        stack.Children.Add(CreateNav("home", "\u9996\u9801"));
+        stack.Children.Add(CreateNav("parse", "\u7db2\u5740\u89e3\u6790"));
+        stack.Children.Add(CreateNav("downloading", "\u4e0b\u8f09\u4e2d"));
+        stack.Children.Add(CreateNav("done", "\u5df2\u5b8c\u6210"));
+        stack.Children.Add(CreateNav("audio", "\u97f3\u6a02\u63d0\u53d6"));
+        stack.Children.Add(CreateNav("files", "\u6a94\u6848\u7ba1\u7406"));
+        stack.Children.Add(CreateNav("history", "\u6b77\u53f2\u8a18\u9304"));
+        stack.Children.Add(CreateNav("fav", "\u6211\u7684\u6700\u611b"));
+
+        stack.Children.Add(new Border { Height = 1, Background = BorderSoft, Margin = new Thickness(4, 12) });
+
+        var mascot = new Border
+        {
+            Background = Brush.Parse("#FFFFFF"),
+            BorderBrush = BorderSoft,
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(14),
+            Padding = new Thickness(12),
+            Margin = new Thickness(0, 4, 0, 0),
+            Child = new StackPanel
+            {
+                Spacing = 6,
+                Children =
+                {
+                    new Border
+                    {
+                        Width = 64,
+                        Height = 64,
+                        CornerRadius = new CornerRadius(32),
+                        Background = new LinearGradientBrush
+                        {
+                            StartPoint = new RelativePoint(0, 0, RelativeUnit.Relative),
+                            EndPoint = new RelativePoint(1, 1, RelativeUnit.Relative),
+                            GradientStops =
+                            {
+                                new GradientStop(Color.Parse("#FFD08A"), 0),
+                                new GradientStop(Color.Parse("#F8B4C4"), 1)
+                            }
+                        },
+                        HorizontalAlignment = HorizontalAlignment.Center,
+                        Child = new TextBlock
+                        {
+                            Text = "YT",
+                            FontSize = 18,
+                            FontWeight = FontWeight.Bold,
+                            Foreground = Brushes.White,
+                            HorizontalAlignment = HorizontalAlignment.Center,
+                            VerticalAlignment = VerticalAlignment.Center
+                        }
+                    },
+                    new TextBlock
+                    {
+                        Text = "YouTube / Bilibili",
+                        FontSize = 11,
+                        Foreground = TextMuted,
+                        HorizontalAlignment = HorizontalAlignment.Center
+                    },
+                    new TextBlock
+                    {
+                        Text = "\u5b89\u5fc3\u8f49\u63db \u00b7 \u672c\u6a5f\u8655\u7406",
+                        FontSize = 11,
+                        Foreground = TextSecondary,
+                        HorizontalAlignment = HorizontalAlignment.Center
+                    }
+                }
+            }
+        };
+        stack.Children.Add(mascot);
+
+        var dock = new DockPanel();
+        var bottomHint = new TextBlock
+        {
+            Text = "\u5b89\u5168\u7121\u6bd2 \u00b7 \u672c\u6a5f\u8f49\u6a94",
+            FontSize = 10,
+            Foreground = TextMuted,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            Margin = new Thickness(0, 8, 0, 0)
+        };
+        DockPanel.SetDock(bottomHint, Dock.Bottom);
+        dock.Children.Add(bottomHint);
+        dock.Children.Add(stack);
+        panel.Child = dock;
+        return panel;
+    }
+
+    private Control CreateNav(string id, string label)
+    {
+        var isActive = id == _activeNav;
+        var border = new Border
+        {
+            Background = isActive ? Blue : Brushes.Transparent,
+            CornerRadius = new CornerRadius(12),
+            Padding = new Thickness(12, 10),
+            Cursor = new Cursor(StandardCursorType.Hand),
+            Tag = id
         };
 
-        root.Children.Add(body);
+        var content = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 10
+        };
+        content.Children.Add(new Ellipse
+        {
+            Width = 8,
+            Height = 8,
+            Fill = isActive ? Brushes.White : Blue,
+            VerticalAlignment = VerticalAlignment.Center
+        });
+        content.Children.Add(new TextBlock
+        {
+            Text = label,
+            FontSize = 13,
+            FontWeight = isActive ? FontWeight.SemiBold : FontWeight.Normal,
+            Foreground = isActive ? Brushes.White : TextPrimary,
+            VerticalAlignment = VerticalAlignment.Center
+        });
+        border.Child = content;
 
-        body.Children.Add(CreateField("影片網址", BuildUrlInputs(), 0));
-        body.Children.Add(CreateField("輸出格式", BuildOutputFormatInput(), 1));
+        border.PointerEntered += (_, _) =>
+        {
+            if ((string?)border.Tag != _activeNav)
+            {
+                border.Background = BlueSoft;
+            }
+        };
+        border.PointerExited += (_, _) =>
+        {
+            if ((string?)border.Tag != _activeNav)
+            {
+                border.Background = Brushes.Transparent;
+            }
+        };
+        border.PointerPressed += (_, _) => Navigate(id);
 
-        var outputRow = new Grid
+        _navItems.Add(new NavItem(id, border));
+        return border;
+    }
+
+    private void Navigate(string id)
+    {
+        _activeNav = id;
+        foreach (var item in _navItems)
+        {
+            var active = item.Id == id;
+            item.Border.Background = active ? Blue : Brushes.Transparent;
+            if (item.Border.Child is StackPanel sp)
+            {
+                if (sp.Children.Count >= 1 && sp.Children[0] is Ellipse dot)
+                {
+                    dot.Fill = active ? Brushes.White : Blue;
+                }
+
+                if (sp.Children.Count >= 2 && sp.Children[1] is TextBlock label)
+                {
+                    label.Foreground = active ? Brushes.White : TextPrimary;
+                    label.FontWeight = active ? FontWeight.SemiBold : FontWeight.Normal;
+                }
+            }
+        }
+
+        switch (id)
+        {
+            case "home":
+            case "parse":
+                ShowHomePage();
+                break;
+            case "downloading":
+                ShowQueuePage(onlyActive: true);
+                break;
+            case "done":
+                ShowQueuePage(onlyDone: true);
+                break;
+            case "audio":
+                SetOutputFormat("MP3");
+                ShowHomePage();
+                SetStatus("\u5df2\u5207\u63db\u5230\u97f3\u6a02\u63d0\u53d6\uff08MP3\uff09");
+                break;
+            case "files":
+                ShowFilesPage();
+                break;
+            case "history":
+                ShowQueuePage();
+                break;
+            case "fav":
+                ShowPlaceholder("\u6211\u7684\u6700\u611b", "\u4e4b\u5f8c\u53ef\u6536\u85cf\u5e38\u7528\u5f71\u7247\u8207\u64ad\u653e\u6e05\u55ae\u3002");
+                break;
+        }
+    }
+
+    private void ShowHomePage()
+    {
+        _mainHost.Children.Clear();
+        _mainHost.Children.Add(BuildHeader());
+        _mainHost.Children.Add(BuildUrlCard());
+        _mainHost.Children.Add(BuildOptionsAndPreviewRow());
+        _mainHost.Children.Add(BuildQueueAndUtilsRow());
+        _mainHost.Children.Add(BuildLogCard());
+        RebuildDownloadList();
+    }
+
+    private void ShowQueuePage(bool onlyActive = false, bool onlyDone = false)
+    {
+        _mainHost.Children.Clear();
+        var title = onlyActive
+            ? "\u4e0b\u8f09\u4e2d"
+            : onlyDone
+                ? "\u5df2\u5b8c\u6210"
+                : "\u6b77\u53f2\u8a18\u9304";
+        var subtitle = onlyActive
+            ? "\u76ee\u524d\u9032\u884c\u4e2d\u7684\u8f49\u63db\u4efb\u52d9"
+            : onlyDone
+                ? "\u5df2\u6210\u529f\u5b8c\u6210\u7684\u6a94\u6848"
+                : "\u6240\u6709\u8f49\u63db\u7d00\u9304";
+        _mainHost.Children.Add(SectionTitle(title, subtitle));
+
+        var filtered = _downloadItems.Where(item =>
+        {
+            if (onlyActive)
+            {
+                return item.State is DownloadState.Queued or DownloadState.Running or DownloadState.Paused;
+            }
+
+            if (onlyDone)
+            {
+                return item.State == DownloadState.Completed;
+            }
+
+            return true;
+        }).ToList();
+
+        if (filtered.Count == 0)
+        {
+            _mainHost.Children.Add(EmptyState("\u76ee\u524d\u6c92\u6709\u9805\u76ee", "\u5f9e\u9996\u9801\u8cbc\u4e0a\u7db2\u5740\u4e26\u958b\u59cb\u8f49\u63db\u3002"));
+            return;
+        }
+
+        var list = new StackPanel { Spacing = 10 };
+        foreach (var item in filtered)
+        {
+            list.Children.Add(item.Root);
+        }
+
+        _mainHost.Children.Add(Card(list));
+    }
+
+    private void ShowFilesPage()
+    {
+        _mainHost.Children.Clear();
+        _mainHost.Children.Add(SectionTitle("\u6a94\u6848\u7ba1\u7406", "\u958b\u555f\u8f38\u51fa\u8cc7\u6599\u593e\uff0c\u7ba1\u7406\u5df2\u8f49\u63db\u7684\u6a94\u6848"));
+
+        var path = _outputBox.Text?.Trim() ?? "";
+        var panel = new StackPanel { Spacing = 12 };
+        panel.Children.Add(new TextBlock
+        {
+            Text = string.IsNullOrWhiteSpace(path) ? "\u5c1a\u672a\u8a2d\u5b9a\u8f38\u51fa\u8cc7\u6599\u593e" : path,
+            FontSize = 14,
+            Foreground = TextPrimary,
+            TextWrapping = TextWrapping.Wrap
+        });
+
+        var openBtn = CreatePrimaryButton("\u958b\u555f\u8cc7\u6599\u593e", 140);
+        openBtn.Click += (_, _) =>
+        {
+            if (string.IsNullOrWhiteSpace(path) || !Directory.Exists(path))
+            {
+                SetStatus("\u8acb\u5148\u9078\u64c7\u6709\u6548\u7684\u8f38\u51fa\u8cc7\u6599\u593e");
+                return;
+            }
+
+            try
+            {
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = path,
+                    UseShellExecute = true
+                });
+            }
+            catch (Exception ex)
+            {
+                SetStatus("\u7121\u6cd5\u958b\u555f\u8cc7\u6599\u593e");
+                AppendLog(ex.Message);
+            }
+        };
+        panel.Children.Add(openBtn);
+        _mainHost.Children.Add(Card(panel));
+    }
+
+    private void ShowPlaceholder(string title, string message)
+    {
+        _mainHost.Children.Clear();
+        _mainHost.Children.Add(SectionTitle(title, message));
+        _mainHost.Children.Add(EmptyState(title, message));
+    }
+
+    private Control BuildHeader()
+    {
+        var row = new Grid
+        {
+            ColumnDefinitions = new ColumnDefinitions("*,Auto"),
+            Margin = new Thickness(0, 0, 0, 4)
+        };
+
+        var left = new StackPanel { Spacing = 4 };
+        var titlePanel = new WrapPanel { Orientation = Orientation.Horizontal };
+        titlePanel.Children.Add(ColoredWord("YouTube", RedYouTube, 26, FontWeight.Bold));
+        titlePanel.Children.Add(ColoredWord(" / ", TextPrimary, 26, FontWeight.Bold));
+        titlePanel.Children.Add(ColoredWord("Bilibili", PinkBili, 26, FontWeight.Bold));
+        titlePanel.Children.Add(ColoredWord(" \u5f71\u7247\u8f49 ", TextPrimary, 26, FontWeight.Bold));
+        titlePanel.Children.Add(ColoredWord("MP4", Blue, 26, FontWeight.Bold));
+        titlePanel.Children.Add(ColoredWord(" / ", TextPrimary, 26, FontWeight.Bold));
+        titlePanel.Children.Add(ColoredWord("MP3", Green, 26, FontWeight.Bold));
+
+        left.Children.Add(titlePanel);
+        left.Children.Add(new TextBlock
+        {
+            Text = "\u652f\u63f4\u9ad8\u756b\u8cea\u4e0b\u8f09 \u00b7 \u5feb\u901f\u8f49\u63db \u00b7 \u6279\u91cf\u8655\u7406",
+            FontSize = 13,
+            Foreground = TextSecondary,
+            Margin = new Thickness(0, 2, 0, 0)
+        });
+        row.Children.Add(left);
+
+        var settingsBtn = CreateSoftButton("\u8a2d\u5b9a", 96);
+        settingsBtn.Click += (_, _) =>
+        {
+            Navigate("files");
+            SetStatus("\u53ef\u5728\u6b64\u7ba1\u7406\u8f38\u51fa\u8cc7\u6599\u593e");
+        };
+        Grid.SetColumn(settingsBtn, 1);
+        settingsBtn.VerticalAlignment = VerticalAlignment.Top;
+        row.Children.Add(settingsBtn);
+        return row;
+    }
+
+    private static TextBlock ColoredWord(string text, IBrush color, double size, FontWeight weight) => new()
+    {
+        Text = text,
+        Foreground = color,
+        FontSize = size,
+        FontWeight = weight,
+        VerticalAlignment = VerticalAlignment.Center
+    };
+
+    private Control BuildUrlCard()
+    {
+        var body = new StackPanel { Spacing = 12 };
+
+        body.Children.Add(new TextBlock
+        {
+            Text = "\u8cbc\u4e0a YouTube \u6216 Bilibili \u5f71\u7247\u7db2\u5740",
+            FontSize = 13,
+            FontWeight = FontWeight.SemiBold,
+            Foreground = TextPrimary
+        });
+
+        var urlRow = new Grid
         {
             ColumnDefinitions = new ColumnDefinitions("*,Auto"),
             ColumnSpacing = 10
         };
-        outputRow.Children.Add(_outputBox);
-        Grid.SetColumn(_chooseFolderButton, 1);
-        outputRow.Children.Add(_chooseFolderButton);
-        body.Children.Add(CreateField("輸出資料夾", outputRow, 2));
+        urlRow.Children.Add(_urlBox);
+        Grid.SetColumn(_pasteButton, 1);
+        urlRow.Children.Add(_pasteButton);
+        body.Children.Add(urlRow);
 
         var actionRow = new Grid
         {
-            ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto"),
+            ColumnDefinitions = new ColumnDefinitions("Auto,Auto,*,Auto"),
             ColumnSpacing = 10
         };
-        actionRow.Children.Add(_statusText);
-        Grid.SetColumn(_clearUrlsButton, 1);
-        actionRow.Children.Add(_clearUrlsButton);
-        Grid.SetColumn(_convertButton, 2);
-        actionRow.Children.Add(_convertButton);
-        Grid.SetRow(actionRow, 3);
+
+        var ytChip = PlatformChip("YouTube", RedYouTube, Brush.Parse("#FFECEC"));
+        var biliChip = PlatformChip("bilibili", PinkBili, PinkBiliSoft);
+        actionRow.Children.Add(ytChip);
+        Grid.SetColumn(biliChip, 1);
+        actionRow.Children.Add(biliChip);
+        Grid.SetColumn(_parseButton, 3);
+        actionRow.Children.Add(_parseButton);
         body.Children.Add(actionRow);
 
-        Grid.SetRow(_progressBar, 4);
-        body.Children.Add(_progressBar);
+        return Card(body);
+    }
 
-        var logPanel = new Grid
+    private Control BuildOptionsAndPreviewRow()
+    {
+        var row = new Grid
         {
-            RowDefinitions = new RowDefinitions("Auto,Auto"),
-            RowSpacing = 8
+            ColumnDefinitions = new ColumnDefinitions("*,1.05*"),
+            ColumnSpacing = 14
         };
-        logPanel.Children.Add(new TextBlock
+
+        var left = new StackPanel { Spacing = 12 };
+
+        left.Children.Add(new TextBlock
         {
-            Text = "記錄",
+            Text = "\u9078\u64c7\u8f49\u63db\u683c\u5f0f",
             FontSize = 13,
             FontWeight = FontWeight.SemiBold,
-            Foreground = Brush.Parse("#394150")
+            Foreground = TextPrimary
         });
-        Grid.SetRow(_logSurface, 1);
-        logPanel.Children.Add(_logSurface);
-        Grid.SetRow(logPanel, 5);
-        body.Children.Add(logPanel);
 
-        return root;
-    }
-
-    private static Control CreateField(string label, Control content, int row)
-    {
-        var panel = new StackPanel { Spacing = 7 };
-        panel.Children.Add(new TextBlock
+        var formatRow = new Grid
         {
-            Text = label,
-            FontSize = 13,
-            FontWeight = FontWeight.SemiBold,
-            Foreground = Brush.Parse("#394150")
-        });
-        panel.Children.Add(content);
-        Grid.SetRow(panel, row);
-        return panel;
-    }
-
-    private static TextBox CreateUrlBox(string label)
-    {
-        return new TextBox
-        {
-            PlaceholderText = $"{label}: 貼上 YouTube 或 Bilibili 影片/播放清單網址",
-            FontSize = 15,
-            MinHeight = 40
+            ColumnDefinitions = new ColumnDefinitions("*,*"),
+            ColumnSpacing = 10
         };
-    }
+        formatRow.Children.Add(_mp4Card);
+        Grid.SetColumn(_mp3Card, 1);
+        formatRow.Children.Add(_mp3Card);
+        left.Children.Add(formatRow);
 
-    private Control BuildUrlInputs()
-    {
-        var panel = new StackPanel { Spacing = 8 };
-
-        var countRow = new StackPanel
+        var qualityPanel = new StackPanel
         {
             Orientation = Orientation.Horizontal,
             Spacing = 10,
             VerticalAlignment = VerticalAlignment.Center
         };
-        countRow.Children.Add(new TextBlock
+        qualityPanel.Children.Add(new TextBlock
         {
-            Text = "網址組數",
+            Text = "\u756b\u8cea\u9078\u64c7 (MP4)",
             FontSize = 13,
-            Foreground = Brush.Parse("#394150"),
+            Foreground = TextSecondary,
             VerticalAlignment = VerticalAlignment.Center
         });
-        countRow.Children.Add(_urlInputCountComboBox);
-        panel.Children.Add(countRow);
-
-        foreach (var urlBox in _urlBoxes)
+        qualityPanel.Children.Add(new TextBlock
         {
-            panel.Children.Add(urlBox);
-        }
+            Text = "1080P (\u63a8\u85a6)",
+            FontSize = 12,
+            Foreground = TextMuted,
+            VerticalAlignment = VerticalAlignment.Center
+        });
+        qualityPanel.Children.Add(_qualityCombo);
+        left.Children.Add(qualityPanel);
+        left.Children.Add(_subtitleCheckBox);
 
-        return panel;
+        left.Children.Add(new TextBlock
+        {
+            Text = "\u5132\u5b58\u4f4d\u7f6e",
+            FontSize = 13,
+            FontWeight = FontWeight.SemiBold,
+            Foreground = TextPrimary,
+            Margin = new Thickness(0, 4, 0, 0)
+        });
+        var pathRow = new Grid
+        {
+            ColumnDefinitions = new ColumnDefinitions("*,Auto"),
+            ColumnSpacing = 10
+        };
+        pathRow.Children.Add(_outputBox);
+        Grid.SetColumn(_browseButton, 1);
+        pathRow.Children.Add(_browseButton);
+        left.Children.Add(pathRow);
+
+        left.Children.Add(_convertButton);
+        left.Children.Add(_statusText);
+
+        var leftCard = Card(left);
+        row.Children.Add(leftCard);
+        Grid.SetColumn(_previewCard, 1);
+        row.Children.Add(_previewCard);
+        return row;
     }
 
-    private Control BuildOutputFormatInput()
+    private Border BuildPreviewCard()
     {
-        var row = new StackPanel
+        var body = new StackPanel { Spacing = 10 };
+
+        var thumb = new Border
+        {
+            Height = 150,
+            CornerRadius = new CornerRadius(12),
+            Background = new LinearGradientBrush
+            {
+                StartPoint = new RelativePoint(0, 0, RelativeUnit.Relative),
+                EndPoint = new RelativePoint(1, 1, RelativeUnit.Relative),
+                GradientStops =
+                {
+                    new GradientStop(Color.Parse("#89C2FF"), 0),
+                    new GradientStop(Color.Parse("#F8C1DE"), 0.55),
+                    new GradientStop(Color.Parse("#FFE6A7"), 1)
+                }
+            },
+            Child = new TextBlock
+            {
+                Text = "\u5f71\u7247\u9810\u89bd",
+                FontSize = 16,
+                FontWeight = FontWeight.SemiBold,
+                Foreground = Brushes.White,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center
+            }
+        };
+        body.Children.Add(thumb);
+        body.Children.Add(_previewTitle);
+
+        var meta = new StackPanel { Spacing = 4 };
+        meta.Children.Add(_previewDuration);
+        meta.Children.Add(_previewViews);
+        meta.Children.Add(_previewDate);
+        body.Children.Add(meta);
+
+        var statusRow = new StackPanel
         {
             Orientation = Orientation.Horizontal,
-            Spacing = 10,
+            Spacing = 6,
+            Margin = new Thickness(0, 4, 0, 0)
+        };
+        statusRow.Children.Add(new Ellipse
+        {
+            Width = 8,
+            Height = 8,
+            Fill = Green,
+            VerticalAlignment = VerticalAlignment.Center
+        });
+        statusRow.Children.Add(_previewStatus);
+        body.Children.Add(statusRow);
+
+        return Card(body);
+    }
+
+    private Control BuildQueueAndUtilsRow()
+    {
+        var row = new Grid
+        {
+            ColumnDefinitions = new ColumnDefinitions("*,220"),
+            ColumnSpacing = 14
+        };
+
+        var queueBody = new StackPanel { Spacing = 10 };
+        var queueHeader = new Grid
+        {
+            ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto")
+        };
+        queueHeader.Children.Add(_queueCountText);
+        var refreshHint = new TextBlock
+        {
+            Text = "\u5373\u6642\u9032\u5ea6",
+            FontSize = 12,
+            Foreground = TextMuted,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0, 0, 10, 0)
+        };
+        Grid.SetColumn(refreshHint, 1);
+        queueHeader.Children.Add(refreshHint);
+        Grid.SetColumn(_clearQueueButton, 2);
+        queueHeader.Children.Add(_clearQueueButton);
+        queueBody.Children.Add(queueHeader);
+        queueBody.Children.Add(_downloadListPanel);
+
+        var queueCard = Card(queueBody);
+        row.Children.Add(queueCard);
+
+        var utils = new StackPanel { Spacing = 10 };
+        utils.Children.Add(new TextBlock
+        {
+            Text = "\u5be6\u7528\u529f\u80fd",
+            FontSize = 14,
+            FontWeight = FontWeight.SemiBold,
+            Foreground = TextPrimary
+        });
+
+        var grid = new Grid
+        {
+            ColumnDefinitions = new ColumnDefinitions("*,*"),
+            RowDefinitions = new RowDefinitions("*,*"),
+            RowSpacing = 10,
+            ColumnSpacing = 10
+        };
+        grid.Children.Add(UtilButton("\u6279\u91cf", "\u6279\u91cf\u4e0b\u8f09", () =>
+        {
+            SetStatus("\u53ef\u5728\u7db2\u5740\u6b04\u8cbc\u591a\u884c\u7db2\u5740\uff08\u6bcf\u884c\u4e00\u500b\uff09\u5f8c\u958b\u59cb\u8f49\u63db");
+            _urlBox.Focus();
+        }));
+        var sub = UtilButton("CC", "\u5b57\u5e55\u642d\u914d", () =>
+        {
+            _includeSubtitles = !_includeSubtitles;
+            _subtitleCheckBox.IsChecked = _includeSubtitles;
+            SaveSettingsIfPossible();
+            SetStatus(_includeSubtitles
+                ? "\u5b57\u5e55\u642d\u914d\u5df2\u958b\uff1a.srt \u5916\u639b + MP4 \u5167\u5d4c / MP3 .lrc"
+                : "\u5b57\u5e55\u642d\u914d\u5df2\u95dc");
+        });
+        Grid.SetColumn(sub, 1);
+        grid.Children.Add(sub);
+        var audio = UtilButton("MP3", "\u97f3\u6a02\u63d0\u53d6", () =>
+        {
+            SetOutputFormat("MP3");
+            SetStatus("\u5df2\u5207\u63db MP3 \u97f3\u6a02\u63d0\u53d6");
+        });
+        Grid.SetRow(audio, 1);
+        grid.Children.Add(audio);
+        var fmt = UtilButton("FMT", "\u683c\u5f0f\u8f49\u63db", () =>
+        {
+            SetOutputFormat(_outputFormat == "MP4" ? "MP3" : "MP4");
+            SetStatus($"\u5df2\u5207\u63db\u70ba {_outputFormat}");
+        });
+        Grid.SetRow(fmt, 1);
+        Grid.SetColumn(fmt, 1);
+        grid.Children.Add(fmt);
+        utils.Children.Add(grid);
+
+        var utilsCard = Card(utils);
+        Grid.SetColumn(utilsCard, 1);
+        row.Children.Add(utilsCard);
+        return row;
+    }
+
+    private Control BuildLogCard()
+    {
+        var body = new StackPanel { Spacing = 8 };
+
+        var copyBtn = CreateIconTextButton("\u8907\u88fd\u5168\u90e8");
+        copyBtn.Click += async (_, _) =>
+        {
+            try
+            {
+                var clipboard = TopLevel.GetTopLevel(this)?.Clipboard;
+                if (clipboard is null || string.IsNullOrEmpty(_logText.Text))
+                {
+                    SetStatus("\u6c92\u6709\u53ef\u8907\u88fd\u7684\u8a18\u9304");
+                    return;
+                }
+
+                await clipboard.SetTextAsync(_logText.Text);
+                SetStatus("\u5df2\u8907\u88fd\u57f7\u884c\u8a18\u9304");
+            }
+            catch (Exception ex)
+            {
+                SetStatus("\u8907\u88fd\u5931\u6557");
+                AppendLog(ex.Message);
+            }
+        };
+
+        var logHeader = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto") };
+        logHeader.Children.Add(new TextBlock
+        {
+            Text = "\u57f7\u884c\u8a18\u9304",
+            FontSize = 13,
+            FontWeight = FontWeight.SemiBold,
+            Foreground = TextPrimary,
+            VerticalAlignment = VerticalAlignment.Center
+        });
+        Grid.SetColumn(copyBtn, 1);
+        logHeader.Children.Add(copyBtn);
+        body.Children.Add(logHeader);
+
+        body.Children.Add(new Border
+        {
+            Background = Brush.Parse("#111827"),
+            BorderBrush = Brush.Parse("#273449"),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(10),
+            Padding = new Thickness(8, 6),
+            MinHeight = 120,
+            MaxHeight = 200,
+            Child = _logText
+        });
+        return Card(body);
+    }
+
+    private Control BuildFooter()
+    {
+        var bar = new Border
+        {
+            Background = Brush.Parse("#F8FBFF"),
+            BorderBrush = BorderSoft,
+            BorderThickness = new Thickness(0, 1, 0, 0),
+            Padding = new Thickness(18, 8)
+        };
+
+        var left = new TextBlock
+        {
+            Text = "\u7248\u672c\uff1a1.0.0  |  \u652f\u63f4 Windows 10/11",
+            FontSize = 12,
+            Foreground = TextMuted,
             VerticalAlignment = VerticalAlignment.Center
         };
-        row.Children.Add(_outputFormatComboBox);
+        var right = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 6,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        right.Children.Add(new Ellipse
+        {
+            Width = 8,
+            Height = 8,
+            Fill = Green,
+            VerticalAlignment = VerticalAlignment.Center
+        });
+        right.Children.Add(new TextBlock
+        {
+            Text = "\u5b89\u5168\u7121\u6bd2",
+            FontSize = 12,
+            Foreground = TextSecondary,
+            VerticalAlignment = VerticalAlignment.Center
+        });
+
+        var grid = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto") };
+        grid.Children.Add(left);
+        Grid.SetColumn(_footerStats, 1);
+        grid.Children.Add(_footerStats);
+        Grid.SetColumn(right, 2);
+        grid.Children.Add(right);
+        bar.Child = grid;
+        return bar;
+    }
+
+    private Border CreateFormatCard(string label, IBrush accent, IBrush softBg, Ellipse radio, bool selected)
+    {
+        var card = new Border
+        {
+            Background = selected ? softBg : BgCard,
+            BorderBrush = selected ? accent : BorderSoft,
+            BorderThickness = new Thickness(selected ? 2 : 1),
+            CornerRadius = new CornerRadius(12),
+            Padding = new Thickness(14, 16),
+            Cursor = new Cursor(StandardCursorType.Hand),
+            MinHeight = 72
+        };
+
+        var row = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto") };
+        row.Children.Add(new Border
+        {
+            Width = 36,
+            Height = 36,
+            CornerRadius = new CornerRadius(10),
+            Background = softBg,
+            Margin = new Thickness(0, 0, 10, 0),
+            Child = new TextBlock
+            {
+                Text = label == "MP4" ? "VID" : "AUD",
+                FontSize = 10,
+                FontWeight = FontWeight.Bold,
+                Foreground = accent,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center
+            }
+        });
         row.Children.Add(new TextBlock
         {
-            Text = "MP4 畫質",
-            FontSize = 13,
-            Foreground = Brush.Parse("#394150"),
+            Text = label,
+            FontSize = 20,
+            FontWeight = FontWeight.Bold,
+            Foreground = accent,
             VerticalAlignment = VerticalAlignment.Center
         });
-        row.Children.Add(_mp4QualityComboBox);
-        return row;
+        Grid.SetColumn(radio, 2);
+        row.Children.Add(radio);
+        card.Child = row;
+        return card;
+    }
+
+    private static Ellipse CreateRadioDot(bool selected) => new()
+    {
+        Width = 18,
+        Height = 18,
+        Stroke = selected ? Blue : BorderSoft,
+        StrokeThickness = selected ? 5 : 2,
+        Fill = Brushes.White,
+        VerticalAlignment = VerticalAlignment.Center
+    };
+
+    private Border UtilButton(string icon, string label, Action onClick)
+    {
+        var border = new Border
+        {
+            Background = BlueSoft,
+            CornerRadius = new CornerRadius(12),
+            Padding = new Thickness(10, 14),
+            Cursor = new Cursor(StandardCursorType.Hand),
+            MinHeight = 72
+        };
+        var stack = new StackPanel { Spacing = 6, HorizontalAlignment = HorizontalAlignment.Center };
+        stack.Children.Add(new TextBlock
+        {
+            Text = icon,
+            FontSize = 14,
+            FontWeight = FontWeight.Bold,
+            Foreground = Blue,
+            HorizontalAlignment = HorizontalAlignment.Center
+        });
+        stack.Children.Add(new TextBlock
+        {
+            Text = label,
+            FontSize = 12,
+            Foreground = TextPrimary,
+            HorizontalAlignment = HorizontalAlignment.Center
+        });
+        border.Child = stack;
+        border.PointerPressed += (_, _) => onClick();
+        border.PointerEntered += (_, _) => border.Background = Brush.Parse("#D9E8FF");
+        border.PointerExited += (_, _) => border.Background = BlueSoft;
+        return border;
+    }
+
+    private static Border PlatformChip(string text, IBrush fg, IBrush bg) => new()
+    {
+        Background = bg,
+        CornerRadius = new CornerRadius(20),
+        Padding = new Thickness(12, 6),
+        Child = new TextBlock
+        {
+            Text = text,
+            FontSize = 12,
+            FontWeight = FontWeight.SemiBold,
+            Foreground = fg
+        }
+    };
+
+    private static Border Card(Control child) => new()
+    {
+        Background = BgCard,
+        BorderBrush = BorderSoft,
+        BorderThickness = new Thickness(1),
+        CornerRadius = new CornerRadius(14),
+        Padding = new Thickness(16),
+        Child = child
+    };
+
+    private static Control SectionTitle(string title, string subtitle)
+    {
+        var stack = new StackPanel { Spacing = 4, Margin = new Thickness(0, 0, 0, 8) };
+        stack.Children.Add(new TextBlock
+        {
+            Text = title,
+            FontSize = 24,
+            FontWeight = FontWeight.Bold,
+            Foreground = TextPrimary
+        });
+        stack.Children.Add(new TextBlock
+        {
+            Text = subtitle,
+            FontSize = 13,
+            Foreground = TextSecondary
+        });
+        return stack;
+    }
+
+    private static Control EmptyState(string title, string message) => Card(new StackPanel
+    {
+        Spacing = 8,
+        Children =
+        {
+            new TextBlock
+            {
+                Text = title,
+                FontSize = 16,
+                FontWeight = FontWeight.SemiBold,
+                Foreground = TextPrimary,
+                HorizontalAlignment = HorizontalAlignment.Center
+            },
+            new TextBlock
+            {
+                Text = message,
+                FontSize = 13,
+                Foreground = TextMuted,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                TextWrapping = TextWrapping.Wrap
+            }
+        }
+    });
+
+    private static TextBox CreateInputBox(string placeholder) => new()
+    {
+        PlaceholderText = placeholder,
+        FontSize = 14,
+        MinHeight = 40,
+        Padding = new Thickness(12, 8)
+    };
+
+    private static Button CreatePrimaryButton(string text, double minWidth) => new()
+    {
+        Content = text,
+        MinWidth = minWidth,
+        MinHeight = 40,
+        FontSize = 13,
+        FontWeight = FontWeight.SemiBold,
+        Foreground = Brushes.White,
+        Background = Blue,
+        CornerRadius = new CornerRadius(10),
+        Cursor = new Cursor(StandardCursorType.Hand),
+        Padding = new Thickness(14, 8)
+    };
+
+    private static Button CreateSoftButton(string text, double minWidth) => new()
+    {
+        Content = text,
+        MinWidth = minWidth,
+        MinHeight = 40,
+        FontSize = 13,
+        Foreground = TextPrimary,
+        Background = BlueSoft,
+        BorderBrush = BorderSoft,
+        BorderThickness = new Thickness(1),
+        CornerRadius = new CornerRadius(10),
+        Cursor = new Cursor(StandardCursorType.Hand),
+        Padding = new Thickness(12, 8)
+    };
+
+    private static Button CreateIconTextButton(string label) => new()
+    {
+        Content = label,
+        MinHeight = 30,
+        FontSize = 12,
+        Foreground = TextSecondary,
+        Background = Brushes.Transparent,
+        Cursor = new Cursor(StandardCursorType.Hand),
+        Padding = new Thickness(8, 4)
+    };
+
+    private static TextBlock MetaLine(string label, string text) => new()
+    {
+        Text = $"{label}:  {text}",
+        FontSize = 12,
+        Foreground = TextSecondary
+    };
+
+    private void SetOutputFormat(string format)
+    {
+        _outputFormat = format is "MP4" or "MP3" ? format : "MP4";
+        var mp4 = _outputFormat == "MP4";
+
+        _mp4Card.Background = mp4 ? BlueSoft : BgCard;
+        _mp4Card.BorderBrush = mp4 ? Blue : BorderSoft;
+        _mp4Card.BorderThickness = new Thickness(mp4 ? 2 : 1);
+        _mp4Radio.Stroke = mp4 ? Blue : BorderSoft;
+        _mp4Radio.StrokeThickness = mp4 ? 5 : 2;
+
+        _mp3Card.Background = !mp4 ? GreenSoft : BgCard;
+        _mp3Card.BorderBrush = !mp4 ? Green : BorderSoft;
+        _mp3Card.BorderThickness = new Thickness(!mp4 ? 2 : 1);
+        _mp3Radio.Stroke = !mp4 ? Green : BorderSoft;
+        _mp3Radio.StrokeThickness = !mp4 ? 5 : 2;
+
+        _qualityCombo.IsEnabled = mp4;
+        SaveSettingsIfPossible();
+    }
+
+    private async void PasteUrlAsync(object? sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var clipboard = TopLevel.GetTopLevel(this)?.Clipboard;
+            if (clipboard is null)
+            {
+                SetStatus("\u7121\u6cd5\u5b58\u53d6\u526a\u8cbc\u7c3f");
+                return;
+            }
+
+            var text = await clipboard.TryGetTextAsync();
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                SetStatus("\u526a\u8cbc\u7c3f\u662f\u7a7a\u7684");
+                return;
+            }
+
+            _urlBox.Text = text.Trim();
+            SetStatus("\u5df2\u8cbc\u4e0a\u7db2\u5740");
+        }
+        catch (Exception ex)
+        {
+            SetStatus("\u8cbc\u4e0a\u5931\u6557");
+            AppendLog(ex.Message);
+        }
     }
 
     private async void ChooseFolderAsync(object? sender, RoutedEventArgs e)
     {
         var folders = await StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions
         {
-            Title = "選擇輸出資料夾",
+            Title = "\u9078\u64c7\u8f38\u51fa\u8cc7\u6599\u593e",
             AllowMultiple = false
         });
 
@@ -344,58 +1325,150 @@ public sealed class MainWindow : Window
         if (folder is not null && folder.TryGetLocalPath() is { } path)
         {
             _outputBox.Text = path;
-            SaveOutputFolderIfValid();
-            SetStatus("輸出資料夾已更新");
+            SaveSettingsIfPossible();
+            SetStatus("\u8f38\u51fa\u8cc7\u6599\u593e\u5df2\u66f4\u65b0");
         }
     }
 
-    private void ClearUrls(object? sender, RoutedEventArgs e)
+    private async void ParseUrlAsync(object? sender, RoutedEventArgs e)
     {
-        foreach (var urlBox in _urlBoxes)
+        var urls = GetInputUrls();
+        if (urls.Length == 0)
         {
-            urlBox.Text = "";
-        }
-
-        SetStatus("網址已清除");
-    }
-
-    private void UrlInputCountChanged(object? sender, SelectionChangedEventArgs e)
-    {
-        if (_urlInputCountComboBox.SelectedItem is not int selectedCount)
-        {
+            SetStatus("\u8acb\u5148\u8cbc\u4e0a YouTube \u6216 Bilibili \u7db2\u5740");
             return;
         }
 
-        _urlInputCount = NormalizeUrlInputCount(selectedCount);
-        UpdateUrlBoxVisibility();
-        SaveSettingsIfPossible();
-        SetStatus($"網址組數已改為 {_urlInputCount} 組");
-    }
-
-    private void OutputFormatChanged(object? sender, SelectionChangedEventArgs e)
-    {
-        if (_outputFormatComboBox.SelectedItem is not string selectedFormat)
+        var ytDlpPath = ToolLocator.FindExecutable("yt-dlp");
+        if (ytDlpPath is null)
         {
+            SetStatus("\u627e\u4e0d\u5230 yt-dlp\uff0c\u8acb\u5148\u5b89\u88dd");
+            AppendInstallHint();
             return;
         }
 
-        _outputFormat = NormalizeOutputFormat(selectedFormat);
-        SaveSettingsIfPossible();
-        SetStatus($"輸出格式已改為 {_outputFormat}");
-        UpdateMp4QualityVisibility();
-        UpdateConvertButtonText();
+        _parseButton.IsEnabled = false;
+        SetStatus("\u6b63\u5728\u89e3\u6790\u7db2\u5740...");
+        AppendLog($"\u89e3\u6790: {urls[0]}");
+
+        try
+        {
+            var info = await DumpVideoInfoAsync(ytDlpPath, urls[0]);
+            if (info is null)
+            {
+                SetStatus("\u89e3\u6790\u5931\u6557\uff0c\u8acb\u6aa2\u67e5\u7db2\u5740\u6216\u7a0d\u5f8c\u518d\u8a66");
+                _previewTitle.Text = "\u89e3\u6790\u5931\u6557";
+                _previewStatus.Text = "\u89e3\u6790\u5931\u6557";
+                _previewStatus.Foreground = Brush.Parse("#EF4444");
+                return;
+            }
+
+            _parsedInfo = info;
+            _previewTitle.Text = info.Title;
+            _previewDuration.Text = $"\u6642\u9577:  {FormatDuration(info.DurationSeconds)}";
+            _previewViews.Text = $"\u6b21\u6578:  {info.ViewCount?.ToString("N0") ?? "-"}";
+            _previewDate.Text = $"\u65e5\u671f:  {info.UploadDate ?? "-"}";
+            _previewStatus.Text = "\u89e3\u6790\u6210\u529f";
+            _previewStatus.Foreground = Green;
+            SetStatus($"\u89e3\u6790\u6210\u529f\uff1a{info.Title}");
+            AppendLog($"\u6a19\u984c: {info.Title}");
+            if (info.DurationSeconds is not null)
+            {
+                AppendLog($"\u6642\u9577: {FormatDuration(info.DurationSeconds)}");
+            }
+        }
+        catch (Exception ex)
+        {
+            SetStatus("\u89e3\u6790\u6642\u767c\u751f\u932f\u8aa4");
+            AppendLog(ex.Message);
+        }
+        finally
+        {
+            _parseButton.IsEnabled = true;
+        }
     }
 
-    private void Mp4QualityChanged(object? sender, SelectionChangedEventArgs e)
+    private async Task<ParsedVideoInfo?> DumpVideoInfoAsync(string ytDlpPath, string url)
     {
-        if (_mp4QualityComboBox.SelectedItem is not string selectedQuality)
+        var startInfo = new ProcessStartInfo
         {
-            return;
+            FileName = ytDlpPath,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+        startInfo.Environment["PYTHONIOENCODING"] = "utf-8";
+        startInfo.Environment["PYTHONUTF8"] = "1";
+        startInfo.ArgumentList.Add("--dump-single-json");
+        startInfo.ArgumentList.Add("--no-playlist");
+        startInfo.ArgumentList.Add("--skip-download");
+        startInfo.ArgumentList.Add("--encoding");
+        startInfo.ArgumentList.Add("utf-8");
+        AddBilibiliBrowserHeaders(startInfo, url);
+        var cookieBrowser = AddBilibiliBrowserCookies(startInfo, url);
+        if (cookieBrowser is not null)
+        {
+            AppendLog($"Bilibili cookies: {cookieBrowser}");
         }
 
-        _mp4Quality = NormalizeMp4Quality(selectedQuality);
-        SaveSettingsIfPossible();
-        SetStatus($"MP4 畫質已改為 {_mp4Quality}");
+        startInfo.ArgumentList.Add(NormalizeMediaUrl(url));
+
+        using var process = new Process { StartInfo = startInfo };
+        if (!process.Start())
+        {
+            return null;
+        }
+
+        var stdout = await process.StandardOutput.ReadToEndAsync();
+        var stderr = await process.StandardError.ReadToEndAsync();
+        await process.WaitForExitAsync();
+
+        if (process.ExitCode != 0)
+        {
+            if (!string.IsNullOrWhiteSpace(stderr))
+            {
+                AppendLog(stderr.Trim());
+            }
+
+            return null;
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(stdout);
+            var root = doc.RootElement;
+            var title = root.TryGetProperty("title", out var t) ? t.GetString() ?? "\u672a\u77e5\u6a19\u984c" : "\u672a\u77e5\u6a19\u984c";
+            double? duration = root.TryGetProperty("duration", out var d) && d.ValueKind == JsonValueKind.Number
+                ? d.GetDouble()
+                : null;
+            long? views = root.TryGetProperty("view_count", out var v) && v.ValueKind == JsonValueKind.Number
+                ? v.GetInt64()
+                : null;
+            string? upload = null;
+            if (root.TryGetProperty("upload_date", out var ud) && ud.GetString() is { Length: 8 } raw)
+            {
+                upload = $"{raw[..4]}-{raw[4..6]}-{raw[6..8]}";
+            }
+
+            return new ParsedVideoInfo(title, duration, views, upload, url);
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"JSON \u89e3\u6790\u5931\u6557: {ex.Message}");
+            return null;
+        }
+    }
+
+    private string[] GetInputUrls()
+    {
+        var text = _urlBox.Text ?? "";
+        return text
+            .Split(['\r', '\n', ' ', '\t'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(NormalizeMediaUrl)
+            .Where(u => u.StartsWith("http", StringComparison.OrdinalIgnoreCase))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
     }
 
     private async void ConvertOrCancelAsync(object? sender, RoutedEventArgs e)
@@ -406,97 +1479,173 @@ public sealed class MainWindow : Window
             return;
         }
 
-        var urls = _urlBoxes
-            .Take(_urlInputCount)
-            .Select(box => box.Text?.Trim())
-            .Where(url => !string.IsNullOrWhiteSpace(url))
-            .Cast<string>()
-            .Select(NormalizeMediaUrl)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToArray();
-
+        var urls = GetInputUrls();
         if (urls.Length == 0)
         {
-            SetStatus("請至少輸入一個 YouTube 或 Bilibili 網址");
+            SetStatus("\u8acb\u81f3\u5c11\u8f38\u5165\u4e00\u500b YouTube \u6216 Bilibili \u7db2\u5740");
             return;
         }
 
         var outputPath = _outputBox.Text?.Trim();
         if (string.IsNullOrWhiteSpace(outputPath) || !Directory.Exists(outputPath))
         {
-            SetStatus("請選擇有效的輸出資料夾");
+            SetStatus("\u8acb\u9078\u64c7\u6709\u6548\u7684\u8f38\u51fa\u8cc7\u6599\u593e");
             return;
         }
-        AppSettings.Save(outputPath, _urlInputCount, _outputFormat, _mp4Quality);
+
+        SaveSettingsIfPossible();
 
         var ytDlpPath = ToolLocator.FindExecutable("yt-dlp");
         var ffmpegPath = ToolLocator.FindExecutable("ffmpeg");
         var ffprobePath = ToolLocator.FindExecutable("ffprobe");
         if (ytDlpPath is null || ffmpegPath is null || ffprobePath is null)
         {
-            SetStatus("找不到轉檔工具，請先安裝後再試");
+            SetStatus("\u627e\u4e0d\u5230\u8f49\u6a94\u5de5\u5177\uff0c\u8acb\u5148\u5b89\u88dd\u5f8c\u518d\u8a66");
             AppendInstallHint();
-            AppendLog($"yt-dlp: {ytDlpPath ?? "找不到"}");
-            AppendLog($"ffmpeg: {ffmpegPath ?? "找不到"}");
-            AppendLog($"ffprobe: {ffprobePath ?? "找不到"}");
+            AppendLog($"yt-dlp: {ytDlpPath ?? "\u627e\u4e0d\u5230"}");
+            AppendLog($"ffmpeg: {ffmpegPath ?? "\u627e\u4e0d\u5230"}");
+            AppendLog($"ffprobe: {ffprobePath ?? "\u627e\u4e0d\u5230"}");
             return;
         }
 
+        foreach (var url in urls)
+        {
+            var title = _parsedInfo is not null && string.Equals(_parsedInfo.Url, url, StringComparison.OrdinalIgnoreCase)
+                ? _parsedInfo.Title
+                : url;
+            var item = new DownloadItemView(title, url, _outputFormat, _mp4Quality);
+            item.OnRemove = () =>
+            {
+                if (item.State == DownloadState.Running)
+                {
+                    return;
+                }
+
+                _downloadItems.Remove(item);
+                RebuildDownloadList();
+            };
+            item.OnCancel = () =>
+            {
+                if (_activeDownload == item)
+                {
+                    _conversionTokenSource?.Cancel();
+                }
+                else if (item.State == DownloadState.Queued)
+                {
+                    item.SetState(DownloadState.Cancelled);
+                }
+            };
+            _downloadItems.Add(item);
+        }
+
+        RebuildDownloadList();
         _conversionTokenSource = new CancellationTokenSource();
         SetBusy(true);
-        _logText.Text = "";
-        AppendLog($"yt-dlp: {ytDlpPath}");
-        AppendLog($"ffmpeg: {ffmpegPath}");
-        AppendLog($"ffprobe: {ffprobePath}");
-        AppendLog($"輸出資料夾: {outputPath}");
-        AppendLog($"輸出格式: {_outputFormat}");
+        AppendLog($"\u8f38\u51fa\u8cc7\u6599\u593e: {outputPath}");
+        AppendLog($"\u8f38\u51fa\u683c\u5f0f: {_outputFormat}");
         if (_outputFormat == "MP4")
         {
-            AppendLog($"MP4 畫質: {_mp4Quality}");
+            AppendLog($"MP4 \u756b\u8cea: {_mp4Quality}");
         }
-        AppendLog("中文字幕: 如果平台提供，會一併下載");
-        AppendLog($"準備轉換 {urls.Length} 個項目");
+
+        AppendLog(_includeSubtitles
+            ? "\u5b57\u5e55: \u958b\u555f\uff08\u4e2d\u6587\u512a\u5148\uff0c\u5916\u639b .srt\uff1bMP4 \u5167\u5d4c\uff1bMP3 \u751f\u6210 .lrc\uff09"
+            : "\u5b57\u5e55: \u95dc\u9589");
 
         try
         {
             var successCount = 0;
-            for (var index = 0; index < urls.Length; index++)
+            var pending = _downloadItems.Where(i => i.State == DownloadState.Queued).ToList();
+            for (var index = 0; index < pending.Count; index++)
             {
-                var current = index + 1;
-                SetStatus($"正在轉換 {current}/{urls.Length}...");
-                AppendLog("");
-                AppendLog($"[{current}/{urls.Length}] {urls[index]}");
+                var item = pending[index];
+                if (item.State == DownloadState.Cancelled)
+                {
+                    continue;
+                }
 
-                var code = await RunYtDlpAsync(ytDlpPath, ffmpegPath, ffprobePath, urls[index], outputPath, _outputFormat, _mp4Quality, _conversionTokenSource.Token);
+                _activeDownload = item;
+                _lastMediaOutputPath = null;
+                item.SetState(DownloadState.Running);
+                SetStatus($"\u6b63\u5728\u8f49\u63db {index + 1}/{pending.Count}...");
+                AppendLog("");
+                AppendLog($"[{index + 1}/{pending.Count}] {item.Url}");
+
+                // Phase 1: media first (never blocked by subtitle rate-limits).
+                var code = await RunYtDlpAsync(
+                    ytDlpPath,
+                    ffmpegPath,
+                    ffprobePath,
+                    item.Url,
+                    outputPath,
+                    item.Format,
+                    item.Quality,
+                    includeSubtitles: false,
+                    _conversionTokenSource.Token,
+                    item);
+
+                if (code == 0 && _includeSubtitles)
+                {
+                    AppendLog("\u5b57\u5e55: \u5f71\u97f3\u5b8c\u6210\uff0c\u958b\u59cb\u53e6\u884c\u4e0b\u8f09\u5b57\u5e55\uff08\u5931\u6557\u4e0d\u5f71\u97ff\u5f71\u97f3\uff09...");
+                    await RunSubtitleDownloadAsync(
+                        ytDlpPath,
+                        ffmpegPath,
+                        ffprobePath,
+                        item.Url,
+                        outputPath,
+                        item.Format,
+                        _conversionTokenSource.Token,
+                        item);
+                    PairSubtitlesWithMedia(outputPath, _lastMediaOutputPath, item.Format, ffmpegPath);
+                }
+
                 if (code == 0)
                 {
                     successCount++;
+                    item.SetState(DownloadState.Completed);
+                    item.SetProgress(100, "\u5b8c\u6210");
+                    _todayDownloads++;
+                    SaveSettingsIfPossible();
+                    UpdateFooter();
+                }
+                else if (_conversionTokenSource.IsCancellationRequested)
+                {
+                    item.SetState(DownloadState.Cancelled);
+                    item.SetProgress(item.Progress, "\u5df2\u53d6\u6d88");
                 }
                 else
                 {
-                    AppendLog($"[{current}/{urls.Length}] 轉換失敗，結束碼 {code}");
+                    item.SetState(DownloadState.Failed);
+                    item.SetProgress(item.Progress, "\u5931\u6557");
+                    AppendLog($"\u8f49\u63db\u5931\u6557\uff0c\u7d50\u675f\u78bc {code}");
                 }
             }
 
-            SetStatus(successCount == urls.Length
-                ? $"完成，已輸出 {successCount} 個 {_outputFormat}"
-                : $"完成 {successCount}/{urls.Length} 個，請查看記錄");
+            SetStatus(successCount == pending.Count
+                ? $"\u5b8c\u6210\uff0c\u5df2\u8f38\u51fa {successCount} \u500b {_outputFormat}"
+                : $"\u5b8c\u6210 {successCount}/{pending.Count} \u500b\uff0c\u8acb\u67e5\u770b\u8a18\u9304");
         }
         catch (OperationCanceledException)
         {
-            SetStatus("已取消");
-            AppendLog("使用者取消轉換。");
+            SetStatus("\u5df2\u53d6\u6d88");
+            AppendLog("\u4f7f\u7528\u8005\u53d6\u6d88\u8f49\u63db\u3002");
+            if (_activeDownload is not null && _activeDownload.State == DownloadState.Running)
+            {
+                _activeDownload.SetState(DownloadState.Cancelled);
+            }
         }
         catch (Exception ex)
         {
-            SetStatus("轉換時發生錯誤");
+            SetStatus("\u8f49\u63db\u6642\u767c\u751f\u932f\u8aa4");
             AppendLog(ex.Message);
         }
         finally
         {
+            _activeDownload = null;
             _conversionTokenSource?.Dispose();
             _conversionTokenSource = null;
             SetBusy(false);
+            RebuildDownloadList();
         }
     }
 
@@ -508,7 +1657,129 @@ public sealed class MainWindow : Window
         string outputPath,
         string outputFormat,
         string mp4Quality,
-        CancellationToken token)
+        bool includeSubtitles,
+        CancellationToken token,
+        DownloadItemView? item)
+    {
+        var startInfo = CreateYtDlpStartInfo(ytDlpPath, ffmpegPath, ffprobePath);
+        AddOutputFormatArguments(startInfo, outputFormat, mp4Quality);
+        startInfo.ArgumentList.Add("--encoding");
+        startInfo.ArgumentList.Add("utf-8");
+        startInfo.ArgumentList.Add("--ffmpeg-location");
+        startInfo.ArgumentList.Add(IoPath.GetDirectoryName(ffmpegPath) ?? ffmpegPath);
+        startInfo.ArgumentList.Add("--newline");
+        startInfo.ArgumentList.Add("--retries");
+        startInfo.ArgumentList.Add("8");
+        startInfo.ArgumentList.Add("--fragment-retries");
+        startInfo.ArgumentList.Add("8");
+
+        // Subtitles are handled in a separate pass so HTTP 429 on captions cannot abort media.
+        if (includeSubtitles)
+        {
+            AddSubtitleArguments(startInfo, forEmbedDuringDownload: false);
+        }
+
+        AddBilibiliBrowserHeaders(startInfo, url);
+        var cookieBrowser = AddBilibiliBrowserCookies(startInfo, url);
+        if (cookieBrowser is not null)
+        {
+            AppendLog($"Bilibili cookies: {cookieBrowser}");
+        }
+
+        if (outputFormat == "MP3")
+        {
+            startInfo.ArgumentList.Add("--embed-thumbnail");
+        }
+
+        startInfo.ArgumentList.Add("--add-metadata");
+        startInfo.ArgumentList.Add("--paths");
+        startInfo.ArgumentList.Add(outputPath);
+        startInfo.ArgumentList.Add("--output");
+        startInfo.ArgumentList.Add("%(title)s.%(ext)s");
+        startInfo.ArgumentList.Add(url);
+
+        return await RunProcessAsync(startInfo, token, item);
+    }
+
+    private async Task RunSubtitleDownloadAsync(
+        string ytDlpPath,
+        string ffmpegPath,
+        string ffprobePath,
+        string url,
+        string outputPath,
+        string outputFormat,
+        CancellationToken token,
+        DownloadItemView? item)
+    {
+        // Prefer one language per attempt to reduce YouTube rate-limit (429) hits.
+        string[] languageAttempts =
+        [
+            "zh-Hant,zh-TW,zh-HK",
+            "zh-Hans,zh-CN",
+            "zh.*",
+            "en"
+        ];
+
+        foreach (var langs in languageAttempts)
+        {
+            if (token.IsCancellationRequested)
+            {
+                break;
+            }
+
+            // If we already have a usable caption file for this run, stop requesting more.
+            if (HasAnySubtitleNearLatestMedia(outputPath, outputFormat, _lastMediaOutputPath))
+            {
+                AppendLog("\u5b57\u5e55: \u5df2\u6709\u53ef\u7528\u6a94\u6848\uff0c\u505c\u6b62\u7e7c\u7e8c\u8acb\u6c42");
+                break;
+            }
+
+            AppendLog($"\u5b57\u5e55\u8a9e\u8a00\u5617\u8a66: {langs}");
+            var startInfo = CreateYtDlpStartInfo(ytDlpPath, ffmpegPath, ffprobePath);
+            startInfo.ArgumentList.Add("--skip-download");
+            startInfo.ArgumentList.Add("--encoding");
+            startInfo.ArgumentList.Add("utf-8");
+            startInfo.ArgumentList.Add("--ffmpeg-location");
+            startInfo.ArgumentList.Add(IoPath.GetDirectoryName(ffmpegPath) ?? ffmpegPath);
+            startInfo.ArgumentList.Add("--newline");
+            startInfo.ArgumentList.Add("--ignore-errors");
+            startInfo.ArgumentList.Add("--retries");
+            startInfo.ArgumentList.Add("3");
+            startInfo.ArgumentList.Add("--sleep-subtitles");
+            startInfo.ArgumentList.Add("2");
+            startInfo.ArgumentList.Add("--write-subs");
+            startInfo.ArgumentList.Add("--write-auto-subs");
+            startInfo.ArgumentList.Add("--sub-langs");
+            startInfo.ArgumentList.Add(langs);
+            startInfo.ArgumentList.Add("--convert-subs");
+            startInfo.ArgumentList.Add("srt");
+            startInfo.ArgumentList.Add("--paths");
+            startInfo.ArgumentList.Add(outputPath);
+            startInfo.ArgumentList.Add("--output");
+            startInfo.ArgumentList.Add("%(title)s.%(ext)s");
+            AddBilibiliBrowserHeaders(startInfo, url);
+            AddBilibiliBrowserCookies(startInfo, url);
+            startInfo.ArgumentList.Add(url);
+
+            var code = await RunProcessAsync(startInfo, token, item);
+            if (code == 0 && HasAnySubtitleNearLatestMedia(outputPath, outputFormat, _lastMediaOutputPath))
+            {
+                break;
+            }
+
+            // Brief pause between language attempts to ease 429 pressure.
+            try
+            {
+                await Task.Delay(1500, token);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+        }
+    }
+
+    private static ProcessStartInfo CreateYtDlpStartInfo(string ytDlpPath, string ffmpegPath, string ffprobePath)
     {
         var startInfo = new ProcessStartInfo
         {
@@ -521,41 +1792,20 @@ public sealed class MainWindow : Window
         startInfo.Environment["PYTHONIOENCODING"] = "utf-8";
         startInfo.Environment["PYTHONUTF8"] = "1";
         ToolLocator.PrependToPath(startInfo.Environment, ytDlpPath, ffmpegPath, ffprobePath);
+        return startInfo;
+    }
 
-        AddOutputFormatArguments(startInfo, outputFormat, mp4Quality);
-        startInfo.ArgumentList.Add("--encoding");
-        startInfo.ArgumentList.Add("utf-8");
-        startInfo.ArgumentList.Add("--ffmpeg-location");
-        startInfo.ArgumentList.Add(Path.GetDirectoryName(ffmpegPath) ?? ffmpegPath);
-        AddChineseSubtitleArguments(startInfo);
-        AddBilibiliBrowserHeaders(startInfo, url);
-        var cookieBrowser = AddBilibiliBrowserCookies(startInfo, url);
-        if (cookieBrowser is not null)
-        {
-            AppendLog($"Bilibili cookies: {cookieBrowser}");
-        }
-        if (outputFormat == "MP3")
-        {
-            startInfo.ArgumentList.Add("--embed-thumbnail");
-        }
-        startInfo.ArgumentList.Add("--add-metadata");
-        startInfo.ArgumentList.Add("--paths");
-        startInfo.ArgumentList.Add(outputPath);
-        startInfo.ArgumentList.Add("--output");
-        startInfo.ArgumentList.Add("%(title)s.%(ext)s");
-        startInfo.ArgumentList.Add(url);
-
+    private async Task<int> RunProcessAsync(ProcessStartInfo startInfo, CancellationToken token, DownloadItemView? item)
+    {
         using var process = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
-        process.OutputDataReceived += (_, args) => AppendLog(args.Data);
-        process.ErrorDataReceived += (_, args) => AppendLog(args.Data);
 
         if (!process.Start())
         {
-            throw new InvalidOperationException("無法啟動 yt-dlp。");
+            throw new InvalidOperationException("\u7121\u6cd5\u555f\u52d5 yt-dlp\u3002");
         }
 
-        var outputTask = ReadProcessStreamAsync(process.StandardOutput.BaseStream, token);
-        var errorTask = ReadProcessStreamAsync(process.StandardError.BaseStream, token);
+        var outputTask = ReadProcessStreamAsync(process.StandardOutput.BaseStream, token, item);
+        var errorTask = ReadProcessStreamAsync(process.StandardError.BaseStream, token, item);
 
         try
         {
@@ -575,14 +1825,414 @@ public sealed class MainWindow : Window
         return process.ExitCode;
     }
 
-    private static void AddChineseSubtitleArguments(ProcessStartInfo startInfo)
+    private static void AddSubtitleArguments(ProcessStartInfo startInfo, bool forEmbedDuringDownload)
     {
         startInfo.ArgumentList.Add("--write-subs");
         startInfo.ArgumentList.Add("--write-auto-subs");
         startInfo.ArgumentList.Add("--sub-langs");
-        startInfo.ArgumentList.Add("zh.*,zh-Hans,zh-Hant,zh-CN,zh-TW,zh");
+        // Keep the primary pass small; multi-lang is handled by the separate subtitle phase.
+        startInfo.ArgumentList.Add("zh-Hant,zh-Hans,en");
         startInfo.ArgumentList.Add("--convert-subs");
         startInfo.ArgumentList.Add("srt");
+        startInfo.ArgumentList.Add("--ignore-errors");
+        startInfo.ArgumentList.Add("--sleep-subtitles");
+        startInfo.ArgumentList.Add("2");
+
+        if (forEmbedDuringDownload)
+        {
+            startInfo.ArgumentList.Add("--embed-subs");
+        }
+    }
+
+    private bool HasAnySubtitleNearLatestMedia(string outputDir, string format, string? mediaPathHint)
+    {
+        var mediaPath = ResolveMediaPath(outputDir, mediaPathHint, format);
+        if (mediaPath is null)
+        {
+            return Directory.Exists(outputDir)
+                && Directory.EnumerateFiles(outputDir, "*.*")
+                    .Any(f => f.EndsWith(".srt", StringComparison.OrdinalIgnoreCase)
+                        || f.EndsWith(".vtt", StringComparison.OrdinalIgnoreCase));
+        }
+
+        var dir = IoPath.GetDirectoryName(mediaPath) ?? outputDir;
+        var stem = IoPath.GetFileNameWithoutExtension(mediaPath);
+        return FindBestSubtitleForStem(dir, stem) is not null
+            || Directory.GetFiles(dir, stem + "*.vtt").Length > 0
+            || Directory.GetFiles(dir, stem + "*.srt").Length > 0;
+    }
+
+    /// <summary>
+    /// Align external subtitle filenames with the media basename so players auto-load them
+    /// (title.srt next to title.mp4 / title.mp3). For MP3 also write a simple .lrc lyrics file.
+    /// For MP4, optionally soft-embed via ffmpeg when an external .srt is available.
+    /// </summary>
+    private void PairSubtitlesWithMedia(string outputDir, string? mediaPathHint, string format, string? ffmpegPath = null)
+    {
+        try
+        {
+            var mediaPath = ResolveMediaPath(outputDir, mediaPathHint, format);
+            if (mediaPath is null || !File.Exists(mediaPath))
+            {
+                AppendLog("\u5b57\u5e55\u5c0d\u9f4a: \u627e\u4e0d\u5230\u5f71\u97f3\u6a94\uff0c\u8df3\u904e");
+                return;
+            }
+
+            var dir = IoPath.GetDirectoryName(mediaPath) ?? outputDir;
+            var stem = IoPath.GetFileNameWithoutExtension(mediaPath);
+            var pairedSrt = IoPath.Combine(dir, stem + ".srt");
+
+            // Convert leftover .vtt files (when convert-subs was interrupted by 429).
+            ConvertMatchingVttToSrt(dir, stem);
+
+            var bestSub = FindBestSubtitleForStem(dir, stem);
+            if (bestSub is null)
+            {
+                AppendLog("\u5b57\u5e55\u5c0d\u9f4a: \u6c92\u6709\u53ef\u7528\u5b57\u5e55\uff08\u53ef\u80fd\u88ab\u9650\u6d41 429 \u6216\u5e73\u53f0\u672a\u63d0\u4f9b\uff09");
+                return;
+            }
+
+            if (!string.Equals(bestSub, pairedSrt, StringComparison.OrdinalIgnoreCase))
+            {
+                File.Copy(bestSub, pairedSrt, overwrite: true);
+                AppendLog($"\u5b57\u5e55\u5c0d\u9f4a: {IoPath.GetFileName(bestSub)} -> {IoPath.GetFileName(pairedSrt)}");
+            }
+            else
+            {
+                AppendLog($"\u5b57\u5e55\u5c0d\u9f4a: {IoPath.GetFileName(pairedSrt)}");
+            }
+
+            if (string.Equals(format, "MP4", StringComparison.OrdinalIgnoreCase)
+                && !string.IsNullOrWhiteSpace(ffmpegPath)
+                && File.Exists(ffmpegPath))
+            {
+                if (TryEmbedSubtitlesIntoMp4(ffmpegPath, mediaPath, pairedSrt))
+                {
+                    AppendLog("MP4: \u5df2\u5167\u5d4c\u5b57\u5e55\u8ecc\u9053\uff08\u64ad\u653e\u5668\u53ef\u958b\u555f\uff09");
+                }
+                else
+                {
+                    AppendLog("MP4: \u5167\u5d4c\u5931\u6557\uff0c\u4ecd\u4fdd\u7559\u5916\u639b .srt");
+                }
+            }
+
+            if (string.Equals(format, "MP3", StringComparison.OrdinalIgnoreCase))
+            {
+                var lrcPath = IoPath.Combine(dir, stem + ".lrc");
+                if (TryWriteLrcFromSrt(pairedSrt, lrcPath))
+                {
+                    AppendLog($"\u6b4c\u8a5e .lrc: {IoPath.GetFileName(lrcPath)}");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"\u5b57\u5e55\u5c0d\u9f4a\u5931\u6557: {ex.Message}");
+        }
+    }
+
+    private void ConvertMatchingVttToSrt(string dir, string stem)
+    {
+        foreach (var vtt in Directory.GetFiles(dir, stem + "*.vtt"))
+        {
+            var srt = IoPath.ChangeExtension(vtt, ".srt");
+            if (File.Exists(srt))
+            {
+                continue;
+            }
+
+            if (TryConvertVttToSrt(vtt, srt))
+            {
+                AppendLog($"VTT -> SRT: {IoPath.GetFileName(srt)}");
+            }
+        }
+    }
+
+    private static bool TryConvertVttToSrt(string vttPath, string srtPath)
+    {
+        try
+        {
+            var raw = File.ReadAllText(vttPath);
+            var lines = raw.Replace("\r\n", "\n").Split('\n');
+            var output = new List<string>();
+            var index = 1;
+            var i = 0;
+            while (i < lines.Length && (lines[i].StartsWith("WEBVTT", StringComparison.OrdinalIgnoreCase)
+                || string.IsNullOrWhiteSpace(lines[i])
+                || lines[i].StartsWith("NOTE", StringComparison.OrdinalIgnoreCase)
+                || lines[i].Contains("-->") == false && i < 5))
+            {
+                // Skip header until first cue; fall through carefully below.
+                if (lines[i].Contains("-->", StringComparison.Ordinal))
+                {
+                    break;
+                }
+
+                i++;
+            }
+
+            while (i < lines.Length)
+            {
+                while (i < lines.Length && string.IsNullOrWhiteSpace(lines[i]))
+                {
+                    i++;
+                }
+
+                if (i >= lines.Length)
+                {
+                    break;
+                }
+
+                // Optional cue identifier line.
+                if (!lines[i].Contains("-->", StringComparison.Ordinal) && i + 1 < lines.Length && lines[i + 1].Contains("-->", StringComparison.Ordinal))
+                {
+                    i++;
+                }
+
+                if (i >= lines.Length || !lines[i].Contains("-->", StringComparison.Ordinal))
+                {
+                    i++;
+                    continue;
+                }
+
+                var timing = lines[i]
+                    .Replace('.', ',')
+                    .Split(new[] { " --> " }, StringSplitOptions.None);
+                if (timing.Length < 2)
+                {
+                    i++;
+                    continue;
+                }
+
+                // Strip VTT positioning settings after timestamp.
+                var start = timing[0].Trim();
+                var end = timing[1].Split(' ')[0].Trim();
+                i++;
+
+                var textLines = new List<string>();
+                while (i < lines.Length && !string.IsNullOrWhiteSpace(lines[i]) && !lines[i].Contains("-->", StringComparison.Ordinal))
+                {
+                    var cleaned = Regex.Replace(lines[i], @"</?[^>]+>", "");
+                    textLines.Add(cleaned.Trim());
+                    i++;
+                }
+
+                if (textLines.Count == 0)
+                {
+                    continue;
+                }
+
+                output.Add(index.ToString(CultureInfo.InvariantCulture));
+                output.Add($"{start} --> {end}");
+                output.AddRange(textLines);
+                output.Add("");
+                index++;
+            }
+
+            if (output.Count == 0)
+            {
+                return false;
+            }
+
+            File.WriteAllText(srtPath, string.Join("\n", output), new UTF8Encoding(false));
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private bool TryEmbedSubtitlesIntoMp4(string ffmpegPath, string mediaPath, string srtPath)
+    {
+        try
+        {
+            var tempPath = mediaPath + ".sub.tmp.mp4";
+            if (File.Exists(tempPath))
+            {
+                File.Delete(tempPath);
+            }
+
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = ffmpegPath,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            startInfo.ArgumentList.Add("-y");
+            startInfo.ArgumentList.Add("-i");
+            startInfo.ArgumentList.Add(mediaPath);
+            startInfo.ArgumentList.Add("-i");
+            startInfo.ArgumentList.Add(srtPath);
+            startInfo.ArgumentList.Add("-c");
+            startInfo.ArgumentList.Add("copy");
+            startInfo.ArgumentList.Add("-c:s");
+            startInfo.ArgumentList.Add("mov_text");
+            startInfo.ArgumentList.Add("-map");
+            startInfo.ArgumentList.Add("0");
+            startInfo.ArgumentList.Add("-map");
+            startInfo.ArgumentList.Add("1:0");
+            startInfo.ArgumentList.Add("-metadata:s:s:0");
+            startInfo.ArgumentList.Add("language=zho");
+            startInfo.ArgumentList.Add(tempPath);
+
+            using var process = Process.Start(startInfo);
+            if (process is null)
+            {
+                return false;
+            }
+
+            process.WaitForExit(120_000);
+            if (process.ExitCode != 0 || !File.Exists(tempPath))
+            {
+                if (File.Exists(tempPath))
+                {
+                    File.Delete(tempPath);
+                }
+
+                return false;
+            }
+
+            File.Delete(mediaPath);
+            File.Move(tempPath, mediaPath);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"ffmpeg embed: {ex.Message}");
+            return false;
+        }
+    }
+
+    private static string? ResolveMediaPath(string outputDir, string? mediaPathHint, string format)
+    {
+        if (!string.IsNullOrWhiteSpace(mediaPathHint) && File.Exists(mediaPathHint))
+        {
+            return mediaPathHint;
+        }
+
+        if (!Directory.Exists(outputDir))
+        {
+            return null;
+        }
+
+        var ext = string.Equals(format, "MP3", StringComparison.OrdinalIgnoreCase) ? ".mp3" : ".mp4";
+        return Directory.GetFiles(outputDir, "*" + ext)
+            .OrderByDescending(File.GetLastWriteTimeUtc)
+            .FirstOrDefault();
+    }
+
+    private static string? FindBestSubtitleForStem(string dir, string stem)
+    {
+        if (!Directory.Exists(dir))
+        {
+            return null;
+        }
+
+        // Match: Title.srt, Title.zh-Hant.srt, Title.zh-Hans-en.srt, etc.
+        var candidates = Directory.GetFiles(dir, "*.srt")
+            .Where(path =>
+            {
+                var name = IoPath.GetFileNameWithoutExtension(path);
+                return name.Equals(stem, StringComparison.OrdinalIgnoreCase)
+                    || name.StartsWith(stem + ".", StringComparison.OrdinalIgnoreCase);
+            })
+            .ToArray();
+
+        if (candidates.Length == 0)
+        {
+            return null;
+        }
+
+        return candidates
+            .OrderBy(path => ScoreSubtitlePath(path, stem))
+            .ThenBy(path => IoPath.GetFileName(path), StringComparer.OrdinalIgnoreCase)
+            .First();
+    }
+
+    private static int ScoreSubtitlePath(string path, string stem)
+    {
+        var name = IoPath.GetFileNameWithoutExtension(path);
+        if (name.Equals(stem, StringComparison.OrdinalIgnoreCase))
+        {
+            return 0;
+        }
+
+        var suffix = name.Length > stem.Length
+            ? name[(stem.Length + (name.Length > stem.Length && name[stem.Length] == '.' ? 1 : 0))..]
+            : name;
+
+        for (var i = 0; i < PreferredSubLangTokens.Length; i++)
+        {
+            if (suffix.Contains(PreferredSubLangTokens[i], StringComparison.OrdinalIgnoreCase))
+            {
+                return i + 1;
+            }
+        }
+
+        return 100;
+    }
+
+    private static bool TryWriteLrcFromSrt(string srtPath, string lrcPath)
+    {
+        try
+        {
+            var text = File.ReadAllText(srtPath);
+            var blocks = Regex.Split(text.Replace("\r\n", "\n"), @"\n\s*\n");
+            var lines = new List<string> { "[ti:]", "[ar:]", "[by:YoutubeBilibiliConverter]" };
+
+            foreach (var block in blocks)
+            {
+                var parts = block.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                if (parts.Length < 2)
+                {
+                    continue;
+                }
+
+                // SRT: index, then "00:00:01,000 --> 00:00:04,000", then text lines
+                var timeLineIndex = parts[0].Contains("-->", StringComparison.Ordinal) ? 0 : 1;
+                if (timeLineIndex >= parts.Length || !parts[timeLineIndex].Contains("-->", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                var timePart = parts[timeLineIndex].Split("-->", 2, StringSplitOptions.TrimEntries)[0];
+                if (!TryParseSrtTimestamp(timePart, out var ts))
+                {
+                    continue;
+                }
+
+                var content = string.Join(" ", parts.Skip(timeLineIndex + 1)).Trim();
+                if (string.IsNullOrWhiteSpace(content))
+                {
+                    continue;
+                }
+
+                lines.Add($"[{ts.Minutes + (int)ts.TotalHours * 60:D2}:{ts.Seconds:D2}.{ts.Milliseconds / 10:D2}]{content}");
+            }
+
+            if (lines.Count <= 3)
+            {
+                return false;
+            }
+
+            File.WriteAllText(lrcPath, string.Join(Environment.NewLine, lines), new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool TryParseSrtTimestamp(string value, out TimeSpan ts)
+    {
+        ts = default;
+        // 00:00:01,000 or 00:00:01.000
+        value = value.Trim().Replace(',', '.');
+        return TimeSpan.TryParse(value, CultureInfo.InvariantCulture, out ts);
     }
 
     private static void AddOutputFormatArguments(ProcessStartInfo startInfo, string outputFormat, string mp4Quality)
@@ -605,7 +2255,13 @@ public sealed class MainWindow : Window
 
     private static string GetMp4FormatSelector(string mp4Quality)
     {
-        var maxHeight = mp4Quality == "4K" ? 2160 : 1080;
+        var maxHeight = mp4Quality.ToUpperInvariant() switch
+        {
+            "4K" => 2160,
+            "720P" => 720,
+            "480P" => 480,
+            _ => 1080
+        };
         return $"bestvideo*[height<={maxHeight}]+bestaudio/best[height<={maxHeight}]/best";
     }
 
@@ -617,7 +2273,7 @@ public sealed class MainWindow : Window
         }
 
         startInfo.ArgumentList.Add("--add-headers");
-        startInfo.ArgumentList.Add("User-Agent:Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36");
+        startInfo.ArgumentList.Add("User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36");
         startInfo.ArgumentList.Add("--add-headers");
         startInfo.ArgumentList.Add("Referer:https://www.bilibili.com/");
         startInfo.ArgumentList.Add("--add-headers");
@@ -668,23 +2324,23 @@ public sealed class MainWindow : Window
             var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
             var programFilesX86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
 
-            if (Directory.Exists(Path.Combine(localAppData, "Mozilla", "Firefox"))
-                || Directory.Exists(Path.Combine(programFiles, "Mozilla Firefox"))
-                || Directory.Exists(Path.Combine(programFilesX86, "Mozilla Firefox")))
+            if (Directory.Exists(IoPath.Combine(localAppData, "Mozilla", "Firefox"))
+                || Directory.Exists(IoPath.Combine(programFiles, "Mozilla Firefox"))
+                || Directory.Exists(IoPath.Combine(programFilesX86, "Mozilla Firefox")))
             {
                 return "firefox";
             }
 
-            if (Directory.Exists(Path.Combine(localAppData, "Google", "Chrome"))
-                || Directory.Exists(Path.Combine(programFiles, "Google", "Chrome"))
-                || Directory.Exists(Path.Combine(programFilesX86, "Google", "Chrome")))
+            if (Directory.Exists(IoPath.Combine(localAppData, "Google", "Chrome"))
+                || Directory.Exists(IoPath.Combine(programFiles, "Google", "Chrome"))
+                || Directory.Exists(IoPath.Combine(programFilesX86, "Google", "Chrome")))
             {
                 return "chrome";
             }
 
-            if (Directory.Exists(Path.Combine(localAppData, "Microsoft", "Edge"))
-                || Directory.Exists(Path.Combine(programFiles, "Microsoft", "Edge"))
-                || Directory.Exists(Path.Combine(programFilesX86, "Microsoft", "Edge")))
+            if (Directory.Exists(IoPath.Combine(localAppData, "Microsoft", "Edge"))
+                || Directory.Exists(IoPath.Combine(programFiles, "Microsoft", "Edge"))
+                || Directory.Exists(IoPath.Combine(programFilesX86, "Microsoft", "Edge")))
             {
                 return "edge";
             }
@@ -713,16 +2369,12 @@ public sealed class MainWindow : Window
         return builder.Uri.ToString();
     }
 
-    private static bool IsBilibiliVideoUrl(string url)
-    {
-        return Uri.TryCreate(url, UriKind.Absolute, out var uri) && IsBilibiliVideoUri(uri);
-    }
+    private static bool IsBilibiliVideoUrl(string url) =>
+        Uri.TryCreate(url, UriKind.Absolute, out var uri) && IsBilibiliVideoUri(uri);
 
-    private static bool IsBilibiliVideoUri(Uri uri)
-    {
-        return uri.Host.EndsWith("bilibili.com", StringComparison.OrdinalIgnoreCase)
-            && uri.AbsolutePath.StartsWith("/video/", StringComparison.OrdinalIgnoreCase);
-    }
+    private static bool IsBilibiliVideoUri(Uri uri) =>
+        uri.Host.EndsWith("bilibili.com", StringComparison.OrdinalIgnoreCase)
+        && uri.AbsolutePath.StartsWith("/video/", StringComparison.OrdinalIgnoreCase);
 
     private static string RemoveTrackingQueryParameters(string query)
     {
@@ -733,17 +2385,11 @@ public sealed class MainWindow : Window
 
         var trackingKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
-            "spm_id_from",
-            "from_spmid",
-            "vd_source",
-            "share_source",
-            "share_medium",
-            "share_plat",
-            "share_session_id",
-            "unique_k"
+            "spm_id_from", "from_spmid", "vd_source", "share_source",
+            "share_medium", "share_plat", "share_session_id", "unique_k"
         };
 
-        var keptParameters = query.TrimStart('?')
+        var kept = query.TrimStart('?')
             .Split('&', StringSplitOptions.RemoveEmptyEntries)
             .Where(parameter =>
             {
@@ -751,10 +2397,10 @@ public sealed class MainWindow : Window
                 return !trackingKeys.Contains(Uri.UnescapeDataString(key));
             });
 
-        return string.Join("&", keptParameters);
+        return string.Join("&", kept);
     }
 
-    private async Task ReadProcessStreamAsync(Stream stream, CancellationToken token)
+    private async Task ReadProcessStreamAsync(Stream stream, CancellationToken token, DownloadItemView? item)
     {
         var buffer = new byte[4096];
         var pending = new List<byte>();
@@ -772,7 +2418,7 @@ public sealed class MainWindow : Window
                 var value = buffer[index];
                 if (value == (byte)'\n')
                 {
-                    AppendDecodedLogLine(pending);
+                    AppendDecodedLogLine(pending, item);
                     pending.Clear();
                     continue;
                 }
@@ -781,10 +2427,10 @@ public sealed class MainWindow : Window
             }
         }
 
-        AppendDecodedLogLine(pending);
+        AppendDecodedLogLine(pending, item);
     }
 
-    private void AppendDecodedLogLine(List<byte> bytes)
+    private void AppendDecodedLogLine(List<byte> bytes, DownloadItemView? item)
     {
         while (bytes.Count > 0 && bytes[^1] == (byte)'\r')
         {
@@ -798,12 +2444,64 @@ public sealed class MainWindow : Window
 
         var line = DecodeProcessText(bytes.ToArray());
         AppendLog(line);
+        TryUpdateProgress(line, item);
+        TryCaptureMediaPath(line);
 
         if (line.Contains("HTTP Error 412", StringComparison.OrdinalIgnoreCase)
             || line.Contains("Precondition Failed", StringComparison.OrdinalIgnoreCase))
         {
-            AppendLog("Bilibili 回傳 412，通常是網站防護、地區限制、會員/登入限制或瀏覽器 cookies 無法讀取。請先確認瀏覽器可正常播放該影片，並關閉瀏覽器後再試一次。");
+            AppendLog("Bilibili returned HTTP 412. Check region/login limits or browser cookies.");
         }
+
+        if (line.Contains("HTTP Error 429", StringComparison.OrdinalIgnoreCase)
+            || line.Contains("Too Many Requests", StringComparison.OrdinalIgnoreCase))
+        {
+            AppendLog("\u63d0\u793a: YouTube \u5b57\u5e55\u9650\u6d41 (429)\u3002\u5f71\u97f3\u4ecd\u6703\u4e0b\u8f09\uff1b\u5b57\u5e55\u6703\u81ea\u52d5\u63db\u8a9e\u8a00\u91cd\u8a66\u6216\u7a0d\u5f8c\u518d\u8a66\u3002");
+        }
+    }
+
+    private void TryCaptureMediaPath(string line)
+    {
+        var match = DestinationRegex.Match(line);
+        if (!match.Success)
+        {
+            return;
+        }
+
+        var path = match.Groups["path"].Value.Trim().Trim('"');
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return;
+        }
+
+        // Prefer final media container paths.
+        if (path.EndsWith(".mp4", StringComparison.OrdinalIgnoreCase)
+            || path.EndsWith(".mp3", StringComparison.OrdinalIgnoreCase)
+            || path.EndsWith(".m4a", StringComparison.OrdinalIgnoreCase)
+            || path.EndsWith(".webm", StringComparison.OrdinalIgnoreCase)
+            || path.EndsWith(".mkv", StringComparison.OrdinalIgnoreCase))
+        {
+            _lastMediaOutputPath = path;
+        }
+    }
+
+    private void TryUpdateProgress(string line, DownloadItemView? item)
+    {
+        var match = ProgressRegex.Match(line);
+        if (!match.Success)
+        {
+            return;
+        }
+
+        if (!double.TryParse(match.Groups["percent"].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var percent))
+        {
+            return;
+        }
+
+        var speed = match.Groups["speed"].Value;
+        _lastSpeed = speed;
+        UpdateFooter();
+        item?.SetProgress(percent, $"{percent:0.#}%  ({speed})");
     }
 
     private static string DecodeProcessText(byte[] bytes)
@@ -839,120 +2537,128 @@ public sealed class MainWindow : Window
 
         if (ytDlp is null || ffmpeg is null || ffprobe is null)
         {
-            SetStatus("需要 yt-dlp 和 ffmpeg 才能轉換 MP3 / MP4");
+            SetStatus("\u9700\u8981 yt-dlp \u548c ffmpeg \u624d\u80fd\u8f49\u63db MP3 / MP4");
             AppendInstallHint();
-            AppendLog($"yt-dlp: {ytDlp ?? "找不到"}");
-            AppendLog($"ffmpeg: {ffmpeg ?? "找不到"}");
-            AppendLog($"ffprobe: {ffprobe ?? "找不到"}");
+            AppendLog($"yt-dlp: {ytDlp ?? "\u627e\u4e0d\u5230"}");
+            AppendLog($"ffmpeg: {ffmpeg ?? "\u627e\u4e0d\u5230"}");
+            AppendLog($"ffprobe: {ffprobe ?? "\u627e\u4e0d\u5230"}");
             return;
         }
 
         AppendLog($"yt-dlp: {ytDlp}");
         AppendLog($"ffmpeg: {ffmpeg}");
         AppendLog($"ffprobe: {ffprobe}");
+        SetStatus("\u6e96\u5099\u5c31\u7dd2 \u00b7 \u5de5\u5177\u5df2\u5c31\u7dd2");
     }
 
     private void AppendInstallHint()
     {
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
         {
-            AppendLog("Windows 第一次使用前，請先安裝轉檔工具：");
-            AppendLog("1. 按 Windows 鍵，輸入「終端機」");
-            AppendLog("2. 在「終端機」上按右鍵，選擇「以系統管理員身分執行」");
-            AppendLog("3. 貼上這行指令後按 Enter：");
-            AppendLog("   winget install yt-dlp.yt-dlp Gyan.FFmpeg");
-            AppendLog("4. 如果畫面詢問是否同意，輸入 Y 後按 Enter");
-            AppendLog("5. 安裝完成後，重新開啟這個程式");
+            AppendLog("Windows: winget install yt-dlp.yt-dlp Gyan.FFmpeg");
+            AppendLog("\u8acb\u4ee5\u7ba1\u7406\u54e1\u8eab\u5206\u57f7\u884c\u7d42\u7aef\u6a5f\u5f8c\u5b89\u88dd\uff0c\u518d\u91cd\u555f\u7a0b\u5f0f\u3002");
             return;
         }
 
         if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
         {
-            AppendLog("macOS 可用 Homebrew 安裝：brew install yt-dlp ffmpeg");
+            AppendLog("macOS: brew install yt-dlp ffmpeg");
             return;
         }
 
-        AppendLog("請用系統套件管理器安裝 yt-dlp 和 ffmpeg，並確認兩者可從 PATH 執行。");
+        AppendLog("Please install yt-dlp and ffmpeg via your package manager.");
     }
 
     private void SetBusy(bool busy)
     {
-        _progressBar.IsIndeterminate = busy;
-        _chooseFolderButton.IsEnabled = !busy;
-        _clearUrlsButton.IsEnabled = !busy;
-        _urlInputCountComboBox.IsEnabled = !busy;
-        _outputFormatComboBox.IsEnabled = !busy;
-        _mp4QualityComboBox.IsEnabled = !busy;
-        foreach (var urlBox in _urlBoxes)
-        {
-            urlBox.IsReadOnly = busy;
-        }
+        _parseButton.IsEnabled = !busy;
+        _pasteButton.IsEnabled = !busy;
+        _browseButton.IsEnabled = !busy;
+        _qualityCombo.IsEnabled = !busy && _outputFormat == "MP4";
+        _subtitleCheckBox.IsEnabled = !busy;
+        _urlBox.IsReadOnly = busy;
         _outputBox.IsReadOnly = busy;
-        UpdateConvertButtonText(busy);
+        _clearQueueButton.IsEnabled = !busy;
+        _convertButton.Content = busy ? "\u53d6\u6d88\u8f49\u63db" : "\u958b\u59cb\u8f49\u63db";
+        _convertButton.Background = busy ? Brush.Parse("#EF4444") : Green;
     }
 
-    private void SaveOutputFolderIfValid()
+    private void RebuildDownloadList()
     {
-        var outputPath = _outputBox.Text?.Trim();
-        if (!string.IsNullOrWhiteSpace(outputPath) && Directory.Exists(outputPath))
+        _downloadListPanel.Children.Clear();
+        _queueCountText.Text = $"\u4e0b\u8f09\u6e05\u55ae ({_downloadItems.Count})";
+
+        if (_downloadItems.Count == 0)
         {
-            SaveSettingsIfPossible();
+            _downloadListPanel.Children.Add(new TextBlock
+            {
+                Text = "\u5c1a\u7121\u4e0b\u8f09\u9805\u76ee\u3002\u89e3\u6790\u7db2\u5740\u5f8c\u6309\u300c\u958b\u59cb\u8f49\u63db\u300d\u5373\u53ef\u52a0\u5165\u6e05\u55ae\u3002",
+                FontSize = 12,
+                Foreground = TextMuted,
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(0, 6)
+            });
+            return;
+        }
+
+        foreach (var item in _downloadItems.AsEnumerable().Reverse().Take(8))
+        {
+            _downloadListPanel.Children.Add(item.Root);
         }
     }
 
     private void SaveSettingsIfPossible()
     {
         var outputPath = _outputBox.Text?.Trim();
-        if (!string.IsNullOrWhiteSpace(outputPath) && Directory.Exists(outputPath))
+        if (string.IsNullOrWhiteSpace(outputPath) || !Directory.Exists(outputPath))
         {
-            AppSettings.Save(outputPath, _urlInputCount, _outputFormat, _mp4Quality);
-            return;
+            outputPath = AppSettings.GetDefaultOutputFolder();
         }
 
-        AppSettings.Save(AppSettings.GetDefaultOutputFolder(), _urlInputCount, _outputFormat, _mp4Quality);
-    }
-
-    private void UpdateUrlBoxVisibility()
-    {
-        for (var index = 0; index < _urlBoxes.Length; index++)
-        {
-            _urlBoxes[index].IsVisible = index < _urlInputCount;
-        }
-    }
-
-    private void UpdateConvertButtonText(bool busy = false)
-    {
-        _convertButton.Content = busy ? "取消" : $"轉成 {_outputFormat}";
-    }
-
-    private void UpdateMp4QualityVisibility()
-    {
-        _mp4QualityComboBox.IsVisible = _outputFormat == "MP4";
-    }
-
-    private static int NormalizeUrlInputCount(int count)
-    {
-        return UrlInputCountOptions.Contains(count) ? count : 1;
-    }
-
-    private static string NormalizeOutputFormat(string? format)
-    {
-        return OutputFormatOptions.Contains(format, StringComparer.OrdinalIgnoreCase)
-            ? format!.ToUpperInvariant()
-            : "MP3";
+        AppSettings.Save(
+            outputPath,
+            1,
+            _outputFormat,
+            _mp4Quality,
+            _todayDownloads,
+            DateOnly.FromDateTime(DateTime.Now),
+            _includeSubtitles);
     }
 
     private static string NormalizeMp4Quality(string? quality)
     {
-        return Mp4QualityOptions.Contains(quality, StringComparer.OrdinalIgnoreCase)
-            ? quality!
-            : "1080p";
+        var q = (quality ?? "1080P").ToUpperInvariant();
+        return q switch
+        {
+            "4K" => "4K",
+            "480P" or "480" => "480P",
+            "720P" or "720" => "720P",
+            "1080P" or "1080" => "1080P",
+            _ => "1080P"
+        };
     }
 
-    private void SetStatus(string text)
+    private static string FormatDuration(double? seconds)
     {
-        _statusText.Text = text;
+        if (seconds is null || seconds < 0)
+        {
+            return "-";
+        }
+
+        var ts = TimeSpan.FromSeconds(seconds.Value);
+        return ts.TotalHours >= 1
+            ? $"{(int)ts.TotalHours}:{ts.Minutes:D2}:{ts.Seconds:D2}"
+            : $"{ts.Minutes:D2}:{ts.Seconds:D2}";
     }
+
+    private string BuildFooterStats() =>
+        $"\u4eca\u65e5\u4e0b\u8f09\uff1a{_todayDownloads} \u500b\u6a94\u6848    \u901f\u5ea6\uff1a{_lastSpeed}";
+
+    private void UpdateFooter() =>
+        Dispatcher.UIThread.Post(() => _footerStats.Text = BuildFooterStats());
+
+    private void SetStatus(string text) =>
+        Dispatcher.UIThread.Post(() => _statusText.Text = text);
 
     private void AppendLog(string? line)
     {
@@ -964,49 +2670,246 @@ public sealed class MainWindow : Window
         Dispatcher.UIThread.Post(() =>
         {
             _logText.Text += $"{line}{Environment.NewLine}";
+            _logText.CaretIndex = _logText.Text?.Length ?? 0;
         });
+    }
+
+    private sealed record NavItem(string Id, Border Border);
+    private sealed record ParsedVideoInfo(string Title, double? DurationSeconds, long? ViewCount, string? UploadDate, string Url);
+
+    private enum DownloadState
+    {
+        Queued,
+        Running,
+        Paused,
+        Completed,
+        Failed,
+        Cancelled
+    }
+
+    private sealed class DownloadItemView
+    {
+        private readonly TextBlock _titleText;
+        private readonly TextBlock _metaText;
+        private readonly TextBlock _progressText;
+        private readonly TextBlock _stateBadge;
+        private readonly ProgressBar _bar;
+        private readonly Border _root;
+
+        public string Title { get; }
+        public string Url { get; }
+        public string Format { get; }
+        public string Quality { get; }
+        public DownloadState State { get; private set; } = DownloadState.Queued;
+        public double Progress { get; private set; }
+        public Border Root => _root;
+        public Action? OnRemove { get; set; }
+        public Action? OnCancel { get; set; }
+
+        public DownloadItemView(string title, string url, string format, string quality)
+        {
+            Title = title;
+            Url = url;
+            Format = format;
+            Quality = quality;
+
+            _titleText = new TextBlock
+            {
+                Text = title,
+                FontSize = 13,
+                FontWeight = FontWeight.SemiBold,
+                Foreground = TextPrimary,
+                TextTrimming = TextTrimming.CharacterEllipsis
+            };
+            _metaText = new TextBlock
+            {
+                Text = format == "MP4" ? $"{format}  {quality}" : $"{format}  high quality",
+                FontSize = 11,
+                Foreground = TextMuted
+            };
+            _progressText = new TextBlock
+            {
+                Text = "\u7b49\u5f85\u4e2d",
+                FontSize = 11,
+                Foreground = TextSecondary,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            _stateBadge = new TextBlock
+            {
+                Text = "\u6392\u968a",
+                FontSize = 11,
+                Foreground = Blue,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            _bar = new ProgressBar
+            {
+                Minimum = 0,
+                Maximum = 100,
+                Value = 0,
+                Height = 6,
+                MinWidth = 120
+            };
+
+            var removeBtn = new Button
+            {
+                Content = "Del",
+                Width = 40,
+                Height = 28,
+                FontSize = 11,
+                Background = Brushes.Transparent,
+                Cursor = new Cursor(StandardCursorType.Hand),
+                Padding = new Thickness(0)
+            };
+            removeBtn.Click += (_, _) => OnRemove?.Invoke();
+
+            var cancelBtn = new Button
+            {
+                Content = "X",
+                Width = 28,
+                Height = 28,
+                FontSize = 11,
+                Background = Brushes.Transparent,
+                Cursor = new Cursor(StandardCursorType.Hand),
+                Padding = new Thickness(0)
+            };
+            cancelBtn.Click += (_, _) => OnCancel?.Invoke();
+
+            var top = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto") };
+            var icon = new Border
+            {
+                Width = 42,
+                Height = 42,
+                CornerRadius = new CornerRadius(8),
+                Background = format == "MP4" ? BlueSoft : GreenSoft,
+                Margin = new Thickness(0, 0, 10, 0),
+                Child = new TextBlock
+                {
+                    Text = format,
+                    FontSize = 11,
+                    FontWeight = FontWeight.Bold,
+                    Foreground = format == "MP4" ? Blue : Green,
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    VerticalAlignment = VerticalAlignment.Center
+                }
+            };
+            top.Children.Add(icon);
+
+            var mid = new StackPanel { Spacing = 2, VerticalAlignment = VerticalAlignment.Center };
+            mid.Children.Add(_titleText);
+            mid.Children.Add(_metaText);
+            Grid.SetColumn(mid, 1);
+            top.Children.Add(mid);
+
+            var actions = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Spacing = 2,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            actions.Children.Add(_stateBadge);
+            actions.Children.Add(cancelBtn);
+            actions.Children.Add(removeBtn);
+            Grid.SetColumn(actions, 2);
+            top.Children.Add(actions);
+
+            var progressRow = new Grid
+            {
+                ColumnDefinitions = new ColumnDefinitions("*,Auto"),
+                ColumnSpacing = 10,
+                Margin = new Thickness(52, 6, 0, 0)
+            };
+            progressRow.Children.Add(_bar);
+            Grid.SetColumn(_progressText, 1);
+            progressRow.Children.Add(_progressText);
+
+            var stack = new StackPanel { Spacing = 0 };
+            stack.Children.Add(top);
+            stack.Children.Add(progressRow);
+
+            _root = new Border
+            {
+                Background = Brush.Parse("#F8FBFF"),
+                BorderBrush = BorderSoft,
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(10),
+                Padding = new Thickness(10),
+                Child = stack
+            };
+        }
+
+        public void SetState(DownloadState state)
+        {
+            State = state;
+            Dispatcher.UIThread.Post(() =>
+            {
+                (_stateBadge.Text, _stateBadge.Foreground) = state switch
+                {
+                    DownloadState.Running => ("\u4e0b\u8f09\u4e2d", Blue),
+                    DownloadState.Completed => ("\u5b8c\u6210", Green),
+                    DownloadState.Failed => ("\u5931\u6557", Brush.Parse("#EF4444")),
+                    DownloadState.Cancelled => ("\u53d6\u6d88", TextMuted),
+                    DownloadState.Paused => ("\u66ab\u505c", Brush.Parse("#F59E0B")),
+                    _ => ("\u6392\u968a", Blue)
+                };
+            });
+        }
+
+        public void SetProgress(double percent, string label)
+        {
+            Progress = Math.Clamp(percent, 0, 100);
+            Dispatcher.UIThread.Post(() =>
+            {
+                _bar.Value = Progress;
+                _progressText.Text = label;
+            });
+        }
     }
 }
 
 internal sealed class AppSettings
 {
-    private static readonly string SettingsDirectory = Path.Combine(
+    private static readonly string SettingsDirectory = IoPath.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
         "YoutubeOrBilibiliMP3Converter");
 
-    private static readonly string LegacySettingsPath = Path.Combine(
+    private static readonly string LegacySettingsPath = IoPath.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
         "YoutubeToMP3Converter",
         "settings.json");
 
-    private static readonly string SettingsPath = Path.Combine(SettingsDirectory, "settings.json");
+    private static readonly string SettingsPath = IoPath.Combine(SettingsDirectory, "settings.json");
 
     public string LastOutputFolder { get; init; } = GetDefaultOutputFolder();
     public int UrlInputCount { get; init; } = 1;
-    public string OutputFormat { get; init; } = "MP3";
-    public string Mp4Quality { get; init; } = "1080p";
+    public string OutputFormat { get; init; } = "MP4";
+    public string Mp4Quality { get; init; } = "1080P";
+    public bool? IncludeSubtitles { get; init; } = true;
+    public int TodayDownloadCount { get; init; }
+    public DateOnly TodayDate { get; init; } = DateOnly.FromDateTime(DateTime.Now);
 
     public static AppSettings Load()
     {
         try
         {
-            var path = File.Exists(SettingsPath)
-                ? SettingsPath
-                : LegacySettingsPath;
-
+            var path = File.Exists(SettingsPath) ? SettingsPath : LegacySettingsPath;
             if (File.Exists(path))
             {
                 var settings = JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(path));
                 if (settings is not null)
                 {
+                    var today = DateOnly.FromDateTime(DateTime.Now);
                     return new AppSettings
                     {
                         LastOutputFolder = Directory.Exists(settings.LastOutputFolder)
                             ? settings.LastOutputFolder
                             : GetDefaultOutputFolder(),
-                        UrlInputCount = NormalizeUrlInputCount(settings.UrlInputCount),
-                        OutputFormat = NormalizeOutputFormat(settings.OutputFormat),
-                        Mp4Quality = NormalizeMp4Quality(settings.Mp4Quality)
+                        UrlInputCount = settings.UrlInputCount is 1 or 3 or 7 ? settings.UrlInputCount : 1,
+                        OutputFormat = string.Equals(settings.OutputFormat, "MP3", StringComparison.OrdinalIgnoreCase) ? "MP3" : "MP4",
+                        Mp4Quality = NormalizeQuality(settings.Mp4Quality),
+                        // Missing property in older settings.json => keep default enabled.
+                        IncludeSubtitles = settings.IncludeSubtitles ?? true,
+                        TodayDownloadCount = settings.TodayDate == today ? settings.TodayDownloadCount : 0,
+                        TodayDate = today
                     };
                 }
             }
@@ -1019,7 +2922,14 @@ internal sealed class AppSettings
         return new AppSettings();
     }
 
-    public static void Save(string outputFolder, int urlInputCount, string outputFormat, string mp4Quality)
+    public static void Save(
+        string outputFolder,
+        int urlInputCount,
+        string outputFormat,
+        string mp4Quality,
+        int todayDownloadCount = 0,
+        DateOnly? todayDate = null,
+        bool includeSubtitles = true)
     {
         try
         {
@@ -1027,43 +2937,55 @@ internal sealed class AppSettings
             var settings = new AppSettings
             {
                 LastOutputFolder = outputFolder,
-                UrlInputCount = NormalizeUrlInputCount(urlInputCount),
-                OutputFormat = NormalizeOutputFormat(outputFormat),
-                Mp4Quality = NormalizeMp4Quality(mp4Quality)
+                UrlInputCount = urlInputCount,
+                OutputFormat = string.Equals(outputFormat, "MP3", StringComparison.OrdinalIgnoreCase) ? "MP3" : "MP4",
+                Mp4Quality = NormalizeQuality(mp4Quality),
+                IncludeSubtitles = includeSubtitles,
+                TodayDownloadCount = todayDownloadCount,
+                TodayDate = todayDate ?? DateOnly.FromDateTime(DateTime.Now)
             };
             var json = JsonSerializer.Serialize(settings, new JsonSerializerOptions { WriteIndented = true });
             File.WriteAllText(SettingsPath, json);
         }
         catch
         {
-            // The converter can still work even if preferences cannot be saved.
+            // Preferences are best-effort.
         }
     }
 
     public static string GetDefaultOutputFolder()
     {
-        var downloads = Path.Combine(
+        var videos = IoPath.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-            "Downloads");
-
-        return Directory.Exists(downloads)
-            ? downloads
-            : Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            "Videos",
+            "Converted");
+        try
+        {
+            Directory.CreateDirectory(videos);
+            return videos;
+        }
+        catch
+        {
+            var downloads = IoPath.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                "Downloads");
+            return Directory.Exists(downloads)
+                ? downloads
+                : Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        }
     }
 
-    private static int NormalizeUrlInputCount(int count)
+    private static string NormalizeQuality(string? quality)
     {
-        return count is 1 or 3 or 7 ? count : 1;
-    }
-
-    private static string NormalizeOutputFormat(string? format)
-    {
-        return string.Equals(format, "MP4", StringComparison.OrdinalIgnoreCase) ? "MP4" : "MP3";
-    }
-
-    private static string NormalizeMp4Quality(string? quality)
-    {
-        return string.Equals(quality, "4K", StringComparison.OrdinalIgnoreCase) ? "4K" : "1080p";
+        var q = (quality ?? "1080P").ToUpperInvariant();
+        return q switch
+        {
+            "4K" => "4K",
+            "480P" or "480" => "480P",
+            "720P" or "720" => "720P",
+            "1080P" or "1080" => "1080P",
+            _ => "1080P"
+        };
     }
 }
 
@@ -1086,7 +3008,7 @@ internal static class ToolLocator
         {
             foreach (var executableName in executableNames)
             {
-                var candidate = Path.Combine(path, executableName);
+                var candidate = IoPath.Combine(path, executableName);
                 if (File.Exists(candidate) && !Directory.Exists(candidate))
                 {
                     return candidate;
@@ -1100,7 +3022,7 @@ internal static class ToolLocator
     public static void PrependToPath(IDictionary<string, string?> environment, params string[] executablePaths)
     {
         var directories = executablePaths
-            .Select(Path.GetDirectoryName)
+            .Select(IoPath.GetDirectoryName)
             .Where(path => !string.IsNullOrWhiteSpace(path))
             .Cast<string>()
             .Distinct(StringComparer.OrdinalIgnoreCase)
@@ -1115,15 +3037,15 @@ internal static class ToolLocator
             ? path
             : Environment.GetEnvironmentVariable("PATH");
 
-        environment["PATH"] = string.Join(Path.PathSeparator, directories.Concat(
-            (existingPath ?? "").Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)));
+        environment["PATH"] = string.Join(IoPath.PathSeparator, directories.Concat(
+            (existingPath ?? "").Split(IoPath.PathSeparator, StringSplitOptions.RemoveEmptyEntries)));
     }
 
     private static IEnumerable<string> GetExecutableNames(string name)
     {
         yield return name;
 
-        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows) || Path.HasExtension(name))
+        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows) || IoPath.HasExtension(name))
         {
             yield break;
         }
@@ -1140,7 +3062,7 @@ internal static class ToolLocator
     private static IEnumerable<string> GetSearchPaths()
     {
         IEnumerable<string> paths = (Environment.GetEnvironmentVariable("PATH") ?? "")
-            .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            .Split(IoPath.PathSeparator, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
         if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
         {

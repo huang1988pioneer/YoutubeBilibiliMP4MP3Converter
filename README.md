@@ -1,8 +1,19 @@
-# YouTube / Bilibili to MP3 Converter
+# 影音轉換大師 v1.0
 
-Avalonia GUI app that converts up to three YouTube or Bilibili URLs to MP3 using `yt-dlp` and `ffmpeg`.
+Avalonia 桌面應用：將 **YouTube** 或 **Bilibili** 影片網址轉換成 **MP4 / MP3**（本機使用 `yt-dlp` + `ffmpeg`）。
 
-## Run
+介面依「影音轉換大師」設計稿實作：側邊導覽、網址解析、格式選擇、下載清單與即時進度。
+
+## 功能
+
+- 貼上 YouTube / Bilibili 網址（支援多行批量）
+- 解析網址：顯示標題、時長、觀看次數、上傳日期
+- 輸出格式：MP4（480P / 720P / 1080P / 4K）或 MP3
+- 下載清單：進度、速度、完成 / 失敗狀態
+- **字幕搭配**（預設開啟）：下載中文優先字幕為外掛 `.srt`；MP4 並內嵌字幕軌；MP3 另產生 `.lrc` 歌詞檔
+- 側邊欄：首頁、下載中、已完成、音樂提取、檔案管理、歷史記錄
+
+## 執行
 
 ```bash
 dotnet run
@@ -23,37 +34,45 @@ winget install yt-dlp.yt-dlp Gyan.FFmpeg
 
 5. 如果畫面問你是否同意，輸入 `Y`，再按 Enter。
 6. 等安裝完成後，關掉終端機。
-7. 重新開啟 YouTube / Bilibili to MP3 Converter，就可以開始使用。
+7. 重新開啟「影音轉換大師」，就可以開始使用。
 
 如果 Windows 顯示找不到 `winget`，請先從 Microsoft Store 更新或安裝「應用程式安裝程式」。
 
-## Build a Windows EXE
+## 建置 Windows EXE
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\build-windows.ps1
 ```
 
-The default output is `publish\win-x64\YoutubeOrBilibiliMP3Converter.exe`.
+預設輸出：`publish\win-x64\YoutubeOrBilibiliMP3Converter.exe`。
 
-For Windows on ARM:
+Windows ARM：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\build-windows.ps1 -Runtime win-arm64
 ```
 
-## macOS setup
+## macOS 設定
 
 ```bash
 brew install yt-dlp ffmpeg
 ```
 
-## Notes
+## 使用方式
 
-Converted MP3 files are saved to the selected output folder. The last valid folder is remembered in the user's application data directory.
+1. 貼上影片網址（或按「貼上」從剪貼簿匯入）
+2. 按「解析網址」預覽影片資訊（可選）
+3. 選擇 MP4 或 MP3，MP4 可選畫質
+4. 確認儲存位置
+5. 按「開始轉換」
 
-YouTube videos, YouTube playlists, Bilibili videos, and Bilibili collection/list URLs are handled by `yt-dlp`. Bilibili downloads use browser-like headers and browser cookies automatically when Firefox, Chrome, Safari, or Edge is available. Some private, region-limited, member-only, login-required, or anti-bot-protected videos may still need cookies or account access outside this app.
+預設輸出資料夾：`%USERPROFILE%\Videos\Converted`
 
-Example Bilibili video URLs:
+## 注意事項
+
+YouTube 影片 / 播放清單、Bilibili 影片會由 `yt-dlp` 處理。Bilibili 會自動使用瀏覽器 headers，並在可用時讀取 Firefox / Chrome / Edge cookies。部分私人、地區限制、會員或需登入的影片仍可能失敗。
+
+範例 Bilibili 網址：
 
 ```text
 https://www.bilibili.com/video/BV158dfBAEbH/
