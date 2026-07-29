@@ -13,6 +13,7 @@ using Avalonia.Input.Platform;
 using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Media;
+using Avalonia.Media.Imaging;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using IoPath = System.IO.Path;
@@ -65,6 +66,14 @@ public sealed class MainWindow : Window
     private readonly Border _mp4Card;
     private readonly Border _mp3Card;
     private readonly Border _previewCard;
+    private readonly Border _previewPlayerHost;
+    private readonly NativeWebView _previewWebView;
+    private readonly Border _previewOverlay;
+    private readonly Image _previewImage;
+    private readonly TextBlock _previewThumbPlaceholder;
+    private readonly Button _previewPlayButton;
+    private readonly Button _previewStopButton;
+    private readonly Button _previewBrowserButton;
     private readonly TextBlock _previewTitle;
     private readonly TextBlock _previewDuration;
     private readonly TextBlock _previewViews;
@@ -88,6 +97,9 @@ public sealed class MainWindow : Window
     private CancellationTokenSource? _conversionTokenSource;
     private DownloadItemView? _activeDownload;
     private string? _lastMediaOutputPath;
+    private Bitmap? _previewBitmap;
+    private int _thumbnailLoadVersion;
+    private bool _embeddedPreviewActive;
 
     // UI update throttling — high-frequency yt-dlp output previously flooded the UI thread
     // and froze/crashed the app during download.
@@ -222,6 +234,88 @@ public sealed class MainWindow : Window
             VerticalAlignment = VerticalAlignment.Center
         };
 
+        _previewImage = new Image
+        {
+            Stretch = Stretch.UniformToFill,
+            IsVisible = false,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            VerticalAlignment = VerticalAlignment.Stretch
+        };
+        _previewThumbPlaceholder = new TextBlock
+        {
+            Text = "\u5f71\u7247\u5167\u5d4c\u9810\u89bd",
+            FontSize = 16,
+            FontWeight = FontWeight.SemiBold,
+            Foreground = Brushes.White,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        _previewWebView = new NativeWebView
+        {
+            IsVisible = false,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            VerticalAlignment = VerticalAlignment.Stretch
+        };
+        _previewWebView.NavigationCompleted += OnPreviewNavigationCompleted;
+        _previewWebView.NewWindowRequested += (_, e) =>
+        {
+            // Keep playback inside the embedded player when possible.
+            e.Handled = true;
+            try
+            {
+                var requested = e.GetType().GetProperty("Uri")?.GetValue(e)
+                    ?? e.GetType().GetProperty("RequestUri")?.GetValue(e)
+                    ?? e.GetType().GetProperty("Target")?.GetValue(e);
+                if (requested is Uri uri)
+                {
+                    _previewWebView.Navigate(uri);
+                }
+                else if (requested is string s && Uri.TryCreate(s, UriKind.Absolute, out var parsed))
+                {
+                    _previewWebView.Navigate(parsed);
+                }
+            }
+            catch
+            {
+                // ignore
+            }
+        };
+
+        _previewOverlay = new Border
+        {
+            Background = new LinearGradientBrush
+            {
+                StartPoint = new RelativePoint(0, 0, RelativeUnit.Relative),
+                EndPoint = new RelativePoint(1, 1, RelativeUnit.Relative),
+                GradientStops =
+                {
+                    new GradientStop(Color.Parse("#89C2FF"), 0),
+                    new GradientStop(Color.Parse("#F8C1DE"), 0.55),
+                    new GradientStop(Color.Parse("#FFE6A7"), 1)
+                }
+            },
+            Cursor = new Cursor(StandardCursorType.Hand)
+        };
+        _previewPlayerHost = new Border
+        {
+            Height = 240,
+            MinHeight = 200,
+            CornerRadius = new CornerRadius(12),
+            ClipToBounds = true,
+            Background = Brush.Parse("#0F172A"),
+            BorderBrush = BorderSoft,
+            BorderThickness = new Thickness(1)
+        };
+        _previewPlayButton = CreatePrimaryButton("\u5167\u5d4c\u64ad\u653e", 120);
+        _previewPlayButton.IsEnabled = false;
+        _previewPlayButton.Click += PlayOriginalVideoAsync;
+        _previewStopButton = CreateSoftButton("\u505c\u6b62\u9810\u89bd", 110);
+        _previewStopButton.IsEnabled = false;
+        _previewStopButton.Click += (_, _) => StopEmbeddedPreview();
+        _previewBrowserButton = CreateSoftButton("\u539f\u9801", 88);
+        _previewBrowserButton.IsEnabled = false;
+        _previewBrowserButton.Click += OpenOriginalInBrowser;
+
         _previewCard = BuildPreviewCard();
         _queueCountText = new TextBlock
         {
@@ -267,6 +361,7 @@ public sealed class MainWindow : Window
         Content = BuildShell();
         SetOutputFormat(_outputFormat);
         Opened += (_, _) => CheckTools();
+        Closing += (_, _) => StopEmbeddedPreview(clearStatus: false);
     }
 
     private Control BuildShell()
@@ -547,6 +642,11 @@ public sealed class MainWindow : Window
 
     private void ShowHomePage()
     {
+        // Shared controls are reused across rebuilds. Avalonia forbids adding a control
+        // that still has a visual parent, so detach them before clearing the host.
+        // NativeWebView needs an explicit reparent scope while its host moves.
+        using var reparent = _previewWebView.BeginReparenting();
+        DetachSharedControls();
         _mainHost.Children.Clear();
         _mainHost.Children.Add(BuildHeader());
         _mainHost.Children.Add(BuildUrlCard());
@@ -558,6 +658,10 @@ public sealed class MainWindow : Window
 
     private void ShowQueuePage(bool onlyActive = false, bool onlyDone = false)
     {
+        // Pause embedded media when leaving the home/preview surface.
+        StopEmbeddedPreview(clearStatus: false);
+        using var reparent = _previewWebView.BeginReparenting();
+        DetachSharedControls();
         _mainHost.Children.Clear();
         var title = onlyActive
             ? "\u4e0b\u8f09\u4e2d"
@@ -595,6 +699,7 @@ public sealed class MainWindow : Window
         var list = new StackPanel { Spacing = 10 };
         foreach (var item in filtered)
         {
+            DetachFromParent(item.Root);
             list.Children.Add(item.Root);
         }
 
@@ -603,9 +708,11 @@ public sealed class MainWindow : Window
 
     private void ShowFilesPage()
     {
+        StopEmbeddedPreview(clearStatus: false);
+        using var reparent = _previewWebView.BeginReparenting();
+        DetachSharedControls();
         _mainHost.Children.Clear();
         _mainHost.Children.Add(SectionTitle("\u6a94\u6848\u7ba1\u7406", "\u958b\u555f\u8f38\u51fa\u8cc7\u6599\u593e\uff0c\u7ba1\u7406\u5df2\u8f49\u63db\u7684\u6a94\u6848"));
-
         var path = _outputBox.Text?.Trim() ?? "";
         var panel = new StackPanel { Spacing = 12 };
         panel.Children.Add(new TextBlock
@@ -645,9 +752,71 @@ public sealed class MainWindow : Window
 
     private void ShowPlaceholder(string title, string message)
     {
+        StopEmbeddedPreview(clearStatus: false);
+        using var reparent = _previewWebView.BeginReparenting();
+        DetachSharedControls();
         _mainHost.Children.Clear();
         _mainHost.Children.Add(SectionTitle(title, message));
         _mainHost.Children.Add(EmptyState(title, message));
+    }
+
+    /// <summary>
+    /// Removes a control from its current visual parent so it can be reparented safely.
+    /// </summary>
+    private static void DetachFromParent(Control? control)
+    {
+        if (control?.Parent is null)
+        {
+            return;
+        }
+
+        switch (control.Parent)
+        {
+            case Panel panel:
+                panel.Children.Remove(control);
+                break;
+            case Decorator decorator:
+                if (ReferenceEquals(decorator.Child, control))
+                {
+                    decorator.Child = null;
+                }
+                break;
+            case ContentControl contentControl:
+                if (ReferenceEquals(contentControl.Content, control))
+                {
+                    contentControl.Content = null;
+                }
+                break;
+        }
+    }
+
+    /// <summary>
+    /// Shared field-backed controls keep their intermediate parents after
+    /// <c>_mainHost.Children.Clear()</c>. Detach them before rebuilding pages.
+    /// </summary>
+    private void DetachSharedControls()
+    {
+        DetachFromParent(_urlBox);
+        DetachFromParent(_pasteButton);
+        DetachFromParent(_parseButton);
+        DetachFromParent(_mp4Card);
+        DetachFromParent(_mp3Card);
+        DetachFromParent(_qualityCombo);
+        DetachFromParent(_subtitleCheckBox);
+        DetachFromParent(_outputBox);
+        DetachFromParent(_browseButton);
+        DetachFromParent(_convertButton);
+        DetachFromParent(_statusText);
+        DetachFromParent(_previewCard);
+        DetachFromParent(_queueCountText);
+        DetachFromParent(_clearQueueButton);
+        DetachFromParent(_downloadListPanel);
+        DetachFromParent(_logText);
+
+        foreach (var item in _downloadItems)
+        {
+            DetachFromParent(item.Root);
+        }
     }
 
     private Control BuildHeader()
@@ -823,32 +992,57 @@ public sealed class MainWindow : Window
     {
         var body = new StackPanel { Spacing = 10 };
 
-        var thumb = new Border
+        var overlayContent = new Grid();
+        overlayContent.Children.Add(_previewImage);
+        overlayContent.Children.Add(_previewThumbPlaceholder);
+        var playHint = new Border
         {
-            Height = 150,
-            CornerRadius = new CornerRadius(12),
-            Background = new LinearGradientBrush
-            {
-                StartPoint = new RelativePoint(0, 0, RelativeUnit.Relative),
-                EndPoint = new RelativePoint(1, 1, RelativeUnit.Relative),
-                GradientStops =
-                {
-                    new GradientStop(Color.Parse("#89C2FF"), 0),
-                    new GradientStop(Color.Parse("#F8C1DE"), 0.55),
-                    new GradientStop(Color.Parse("#FFE6A7"), 1)
-                }
-            },
+            Width = 56,
+            Height = 56,
+            CornerRadius = new CornerRadius(28),
+            Background = Brush.Parse("#99000000"),
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+            IsHitTestVisible = false,
             Child = new TextBlock
             {
-                Text = "\u5f71\u7247\u9810\u89bd",
-                FontSize = 16,
-                FontWeight = FontWeight.SemiBold,
+                Text = "\u25b6",
+                FontSize = 24,
                 Foreground = Brushes.White,
                 HorizontalAlignment = HorizontalAlignment.Center,
-                VerticalAlignment = VerticalAlignment.Center
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(3, 0, 0, 0)
             }
         };
-        body.Children.Add(thumb);
+        overlayContent.Children.Add(playHint);
+        _previewOverlay.Child = overlayContent;
+        _previewOverlay.PointerPressed += async (_, e) =>
+        {
+            if (e.GetCurrentPoint(_previewOverlay).Properties.IsLeftButtonPressed
+                && _previewPlayButton.IsEnabled)
+            {
+                await PlayOriginalVideoCoreAsync();
+            }
+        };
+
+        var playerGrid = new Grid();
+        playerGrid.Children.Add(_previewWebView);
+        playerGrid.Children.Add(_previewOverlay);
+        _previewPlayerHost.Child = playerGrid;
+        body.Children.Add(_previewPlayerHost);
+
+        var actionRow = new Grid
+        {
+            ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto"),
+            ColumnSpacing = 8
+        };
+        actionRow.Children.Add(_previewPlayButton);
+        Grid.SetColumn(_previewStopButton, 1);
+        actionRow.Children.Add(_previewStopButton);
+        Grid.SetColumn(_previewBrowserButton, 2);
+        actionRow.Children.Add(_previewBrowserButton);
+        body.Children.Add(actionRow);
+
         body.Children.Add(_previewTitle);
 
         var meta = new StackPanel { Spacing = 4 };
@@ -1314,7 +1508,11 @@ public sealed class MainWindow : Window
             }
 
             _urlBox.Text = text.Trim();
-            SetStatus("\u5df2\u8cbc\u4e0a\u7db2\u5740");
+            SetStatus("\u5df2\u8cbc\u4e0a\u7db2\u5740\uff0c\u6b63\u5728\u89e3\u6790\u9810\u89bd...");
+            if (GetInputUrls().Length > 0)
+            {
+                await ParseUrlCoreAsync();
+            }
         }
         catch (Exception ex)
         {
@@ -1340,7 +1538,9 @@ public sealed class MainWindow : Window
         }
     }
 
-    private async void ParseUrlAsync(object? sender, RoutedEventArgs e)
+    private async void ParseUrlAsync(object? sender, RoutedEventArgs e) => await ParseUrlCoreAsync();
+
+    private async Task ParseUrlCoreAsync()
     {
         var urls = GetInputUrls();
         if (urls.Length == 0)
@@ -1358,6 +1558,10 @@ public sealed class MainWindow : Window
         }
 
         _parseButton.IsEnabled = false;
+        _previewPlayButton.IsEnabled = false;
+        _previewStopButton.IsEnabled = false;
+        _previewBrowserButton.IsEnabled = false;
+        StopEmbeddedPreview(clearStatus: false);
         SetStatus("\u6b63\u5728\u89e3\u6790\u7db2\u5740...");
         AppendLog($"\u89e3\u6790: {urls[0]}");
 
@@ -1367,9 +1571,11 @@ public sealed class MainWindow : Window
             if (info is null)
             {
                 SetStatus("\u89e3\u6790\u5931\u6557\uff0c\u8acb\u6aa2\u67e5\u7db2\u5740\u6216\u7a0d\u5f8c\u518d\u8a66");
+                _parsedInfo = null;
                 _previewTitle.Text = "\u89e3\u6790\u5931\u6557";
                 _previewStatus.Text = "\u89e3\u6790\u5931\u6557";
                 _previewStatus.Foreground = Brush.Parse("#EF4444");
+                ClearPreviewThumbnail();
                 return;
             }
 
@@ -1378,14 +1584,20 @@ public sealed class MainWindow : Window
             _previewDuration.Text = $"\u6642\u9577:  {FormatDuration(info.DurationSeconds)}";
             _previewViews.Text = $"\u6b21\u6578:  {info.ViewCount?.ToString("N0") ?? "-"}";
             _previewDate.Text = $"\u65e5\u671f:  {info.UploadDate ?? "-"}";
-            _previewStatus.Text = "\u89e3\u6790\u6210\u529f";
+            _previewStatus.Text = "\u89e3\u6790\u6210\u529f \u00b7 \u53ef\u5167\u5d4c\u64ad\u653e";
             _previewStatus.Foreground = Green;
+            _previewPlayButton.IsEnabled = true;
+            _previewBrowserButton.IsEnabled = true;
             SetStatus($"\u89e3\u6790\u6210\u529f\uff1a{info.Title}");
             AppendLog($"\u6a19\u984c: {info.Title}");
             if (info.DurationSeconds is not null)
             {
                 AppendLog($"\u6642\u9577: {FormatDuration(info.DurationSeconds)}");
             }
+
+            _ = LoadPreviewThumbnailAsync(info.ThumbnailUrl);
+            // Auto-load the embedded original player (user can press play in-player).
+            StartEmbeddedPreview(autoplay: false);
         }
         catch (Exception ex)
         {
@@ -1461,12 +1673,443 @@ public sealed class MainWindow : Window
                 upload = $"{raw[..4]}-{raw[4..6]}-{raw[6..8]}";
             }
 
-            return new ParsedVideoInfo(title, duration, views, upload, url);
+            var thumbnail = ExtractThumbnailUrl(root);
+            var webpage = root.TryGetProperty("webpage_url", out var wu) ? wu.GetString() : null;
+            if (string.IsNullOrWhiteSpace(webpage))
+            {
+                webpage = root.TryGetProperty("original_url", out var ou) ? ou.GetString() : url;
+            }
+
+            var id = root.TryGetProperty("id", out var idEl) ? idEl.GetString() : null;
+            var extractor = root.TryGetProperty("extractor_key", out var ek)
+                ? ek.GetString()
+                : root.TryGetProperty("extractor", out var ex) ? ex.GetString() : null;
+
+            return new ParsedVideoInfo(title, duration, views, upload, url, thumbnail, webpage, id, extractor);
         }
         catch (Exception ex)
         {
             AppendLog($"JSON \u89e3\u6790\u5931\u6557: {ex.Message}");
             return null;
+        }
+    }
+
+    private static string? ExtractThumbnailUrl(JsonElement root)
+    {
+        if (root.TryGetProperty("thumbnail", out var thumb) && thumb.ValueKind == JsonValueKind.String)
+        {
+            var direct = thumb.GetString();
+            if (!string.IsNullOrWhiteSpace(direct))
+            {
+                return direct;
+            }
+        }
+
+        if (root.TryGetProperty("thumbnails", out var thumbs) && thumbs.ValueKind == JsonValueKind.Array)
+        {
+            string? best = null;
+            var bestArea = -1;
+            foreach (var item in thumbs.EnumerateArray())
+            {
+                var url = item.TryGetProperty("url", out var u) ? u.GetString() : null;
+                if (string.IsNullOrWhiteSpace(url))
+                {
+                    continue;
+                }
+
+                var w = item.TryGetProperty("width", out var ww) && ww.ValueKind == JsonValueKind.Number
+                    ? ww.GetInt32()
+                    : 0;
+                var h = item.TryGetProperty("height", out var hh) && hh.ValueKind == JsonValueKind.Number
+                    ? hh.GetInt32()
+                    : 0;
+                var area = w * h;
+                if (area >= bestArea)
+                {
+                    bestArea = area;
+                    best = url;
+                }
+            }
+
+            return best;
+        }
+
+        return null;
+    }
+
+    private async void PlayOriginalVideoAsync(object? sender, RoutedEventArgs e) => await PlayOriginalVideoCoreAsync();
+
+    private async Task PlayOriginalVideoCoreAsync()
+    {
+        var url = _parsedInfo?.Url ?? GetInputUrls().FirstOrDefault();
+        if (string.IsNullOrWhiteSpace(url))
+        {
+            SetStatus("\u8acb\u5148\u8cbc\u4e0a\u4e26\u89e3\u6790\u5f71\u7247\u7db2\u5740");
+            return;
+        }
+
+        // Ensure metadata is ready when user plays right after pasting.
+        if (_parsedInfo is null || !string.Equals(_parsedInfo.Url, url, StringComparison.OrdinalIgnoreCase))
+        {
+            await ParseUrlCoreAsync();
+            if (_parsedInfo is null)
+            {
+                return;
+            }
+        }
+
+        StartEmbeddedPreview(autoplay: true);
+    }
+
+    private void StartEmbeddedPreview(bool autoplay)
+    {
+        if (_parsedInfo is null)
+        {
+            SetStatus("\u8acb\u5148\u89e3\u6790\u5f71\u7247");
+            return;
+        }
+
+        var embed = TryBuildEmbedUri(_parsedInfo, autoplay);
+        if (embed is null)
+        {
+            SetStatus("\u7121\u6cd5\u5efa\u7acb\u5167\u5d4c\u64ad\u653e\u7db2\u5740\uff0c\u6539\u70ba\u958b\u555f\u539f\u9801");
+            OpenOriginalPage(_parsedInfo.WebpageUrl ?? _parsedInfo.Url);
+            return;
+        }
+
+        try
+        {
+            _previewWebView.IsVisible = true;
+            _previewOverlay.IsVisible = false;
+            _previewWebView.Source = embed;
+            _embeddedPreviewActive = true;
+            _previewStopButton.IsEnabled = true;
+            _previewPlayButton.IsEnabled = true;
+            _previewStatus.Text = autoplay
+                ? "\u5167\u5d4c\u64ad\u653e\u4e2d"
+                : "\u5167\u5d4c\u64ad\u653e\u5668\u5df2\u8f09\u5165";
+            _previewStatus.Foreground = Blue;
+            SetStatus(autoplay
+                ? "\u6b63\u5728\u5167\u5d4c\u64ad\u653e\u539f\u5f71\u7247"
+                : "\u5df2\u5167\u5d4c\u539f\u5f71\u7247\u64ad\u653e\u5668\uff0c\u53ef\u76f4\u63a5\u9ede\u64ad\u653e");
+            AppendLog($"\u5167\u5d4c\u9810\u89bd: {embed}");
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"\u5167\u5d4c\u64ad\u653e\u5668\u555f\u52d5\u5931\u6557: {ex.Message}");
+            SetStatus("\u5167\u5d4c\u64ad\u653e\u5668\u4e0d\u53ef\u7528\uff08\u53ef\u80fd\u7f3a WebView2\uff09\uff0c\u6539\u70ba\u958b\u555f\u539f\u9801");
+            _previewOverlay.IsVisible = true;
+            _previewWebView.IsVisible = false;
+            OpenOriginalPage(_parsedInfo.WebpageUrl ?? _parsedInfo.Url);
+        }
+    }
+
+    private void StopEmbeddedPreview(bool clearStatus = true)
+    {
+        try
+        {
+            if (_embeddedPreviewActive || _previewWebView.IsVisible)
+            {
+                _previewWebView.Stop();
+                _previewWebView.Source = new Uri("about:blank");
+            }
+        }
+        catch
+        {
+            // ignore stop failures
+        }
+
+        _embeddedPreviewActive = false;
+        _previewWebView.IsVisible = false;
+        _previewOverlay.IsVisible = true;
+        _previewStopButton.IsEnabled = false;
+
+        if (_parsedInfo is not null)
+        {
+            _previewPlayButton.IsEnabled = true;
+            _previewStatus.Text = "\u89e3\u6790\u6210\u529f \u00b7 \u53ef\u5167\u5d4c\u64ad\u653e";
+            _previewStatus.Foreground = Green;
+            if (clearStatus)
+            {
+                SetStatus("\u5df2\u505c\u6b62\u5167\u5d4c\u9810\u89bd");
+            }
+        }
+    }
+
+    private void OnPreviewNavigationCompleted(object? sender, WebViewNavigationCompletedEventArgs e)
+    {
+        if (!_embeddedPreviewActive)
+        {
+            return;
+        }
+
+        if (e.IsSuccess)
+        {
+            _previewStatus.Text = "\u5167\u5d4c\u64ad\u653e\u5668\u5df2\u5c31\u7dd2";
+            _previewStatus.Foreground = Green;
+            return;
+        }
+
+        _previewStatus.Text = "\u5167\u5d4c\u8f09\u5165\u5931\u6557";
+        _previewStatus.Foreground = Brush.Parse("#EF4444");
+        AppendLog("\u5167\u5d4c\u7db2\u9801\u8f09\u5165\u5931\u6557\uff0c\u53ef\u6539\u7528\u300c\u539f\u9801\u300d");
+    }
+
+    private static Uri? TryBuildEmbedUri(ParsedVideoInfo info, bool autoplay)
+    {
+        var ap = autoplay ? "1" : "0";
+        var extractor = info.ExtractorKey ?? "";
+        var id = info.VideoId;
+        var page = info.WebpageUrl ?? info.Url;
+
+        // Prefer platform IDs from yt-dlp when available.
+        if (!string.IsNullOrWhiteSpace(id))
+        {
+            if (extractor.Contains("Youtube", StringComparison.OrdinalIgnoreCase)
+                || extractor.Contains("YouTube", StringComparison.OrdinalIgnoreCase)
+                || IsYouTubeUrl(page))
+            {
+                return new Uri(
+                    $"https://www.youtube.com/embed/{Uri.EscapeDataString(id)}?autoplay={ap}&rel=0&modestbranding=1&playsinline=1");
+            }
+
+            if (extractor.Contains("Bili", StringComparison.OrdinalIgnoreCase) || IsBilibiliVideoUrl(page))
+            {
+                if (id.StartsWith("BV", StringComparison.OrdinalIgnoreCase))
+                {
+                    return new Uri(
+                        $"https://player.bilibili.com/player.html?bvid={Uri.EscapeDataString(id)}&autoplay={ap}&high_quality=1&danmaku=0");
+                }
+
+                if (id.StartsWith("av", StringComparison.OrdinalIgnoreCase)
+                    && long.TryParse(id.AsSpan(2), out _))
+                {
+                    return new Uri(
+                        $"https://player.bilibili.com/player.html?aid={Uri.EscapeDataString(id[2..])}&autoplay={ap}&high_quality=1&danmaku=0");
+                }
+
+                if (long.TryParse(id, out _))
+                {
+                    return new Uri(
+                        $"https://player.bilibili.com/player.html?aid={Uri.EscapeDataString(id)}&autoplay={ap}&high_quality=1&danmaku=0");
+                }
+            }
+        }
+
+        return TryBuildEmbedUriFromPageUrl(page, autoplay);
+    }
+
+    private static Uri? TryBuildEmbedUriFromPageUrl(string? pageUrl, bool autoplay)
+    {
+        if (string.IsNullOrWhiteSpace(pageUrl) || !Uri.TryCreate(pageUrl, UriKind.Absolute, out var uri))
+        {
+            return null;
+        }
+
+        var ap = autoplay ? "1" : "0";
+        var host = uri.Host.ToLowerInvariant();
+        var path = uri.AbsolutePath;
+
+        if (host.Contains("youtu.be", StringComparison.OrdinalIgnoreCase))
+        {
+            var id = path.Trim('/');
+            if (!string.IsNullOrWhiteSpace(id))
+            {
+                return new Uri(
+                    $"https://www.youtube.com/embed/{Uri.EscapeDataString(id)}?autoplay={ap}&rel=0&modestbranding=1&playsinline=1");
+            }
+        }
+
+        if (host.Contains("youtube.com", StringComparison.OrdinalIgnoreCase)
+            || host.Contains("youtube-nocookie.com", StringComparison.OrdinalIgnoreCase))
+        {
+            var id = GetQueryParameter(uri, "v");
+            if (string.IsNullOrWhiteSpace(id))
+            {
+                var parts = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length >= 2
+                    && (parts[0].Equals("embed", StringComparison.OrdinalIgnoreCase)
+                        || parts[0].Equals("shorts", StringComparison.OrdinalIgnoreCase)
+                        || parts[0].Equals("live", StringComparison.OrdinalIgnoreCase)))
+                {
+                    id = parts[1];
+                }
+            }
+
+            if (!string.IsNullOrWhiteSpace(id))
+            {
+                return new Uri(
+                    $"https://www.youtube.com/embed/{Uri.EscapeDataString(id)}?autoplay={ap}&rel=0&modestbranding=1&playsinline=1");
+            }
+        }
+
+        if (host.Contains("bilibili.com", StringComparison.OrdinalIgnoreCase)
+            || host.Contains("b23.tv", StringComparison.OrdinalIgnoreCase))
+        {
+            var bv = Regex.Match(pageUrl, @"BV[0-9A-Za-z]+", RegexOptions.IgnoreCase);
+            if (bv.Success)
+            {
+                return new Uri(
+                    $"https://player.bilibili.com/player.html?bvid={Uri.EscapeDataString(bv.Value)}&autoplay={ap}&high_quality=1&danmaku=0");
+            }
+
+            var av = Regex.Match(pageUrl, @"av(\d+)", RegexOptions.IgnoreCase);
+            if (av.Success)
+            {
+                return new Uri(
+                    $"https://player.bilibili.com/player.html?aid={av.Groups[1].Value}&autoplay={ap}&high_quality=1&danmaku=0");
+            }
+        }
+
+        // Last resort: load original page inside the embedded webview.
+        return uri;
+    }
+
+    private static bool IsYouTubeUrl(string? url)
+    {
+        if (string.IsNullOrWhiteSpace(url))
+        {
+            return false;
+        }
+
+        return url.Contains("youtube.com", StringComparison.OrdinalIgnoreCase)
+            || url.Contains("youtu.be", StringComparison.OrdinalIgnoreCase)
+            || url.Contains("youtube-nocookie.com", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string? GetQueryParameter(Uri uri, string name)
+    {
+        var query = uri.Query;
+        if (string.IsNullOrEmpty(query))
+        {
+            return null;
+        }
+
+        var trimmed = query[0] == '?' ? query[1..] : query;
+        foreach (var part in trimmed.Split('&', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var pair = part.Split('=', 2);
+            if (pair.Length == 0)
+            {
+                continue;
+            }
+
+            var key = Uri.UnescapeDataString(pair[0]);
+            if (!key.Equals(name, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            return pair.Length > 1 ? Uri.UnescapeDataString(pair[1]) : "";
+        }
+
+        return null;
+    }
+
+    private void OpenOriginalInBrowser(object? sender, RoutedEventArgs e)
+    {
+        var url = _parsedInfo?.WebpageUrl
+            ?? _parsedInfo?.Url
+            ?? GetInputUrls().FirstOrDefault();
+        if (string.IsNullOrWhiteSpace(url))
+        {
+            SetStatus("\u8acb\u5148\u8cbc\u4e0a\u5f71\u7247\u7db2\u5740");
+            return;
+        }
+
+        OpenOriginalPage(url);
+    }
+
+    private void OpenOriginalPage(string url)
+    {
+        try
+        {
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = url,
+                UseShellExecute = true
+            });
+            SetStatus("\u5df2\u5728\u700f\u89bd\u5668\u958b\u555f\u539f\u5f71\u7247");
+            AppendLog($"\u700f\u89bd\u5668\u958b\u555f: {url}");
+        }
+        catch (Exception ex)
+        {
+            SetStatus("\u7121\u6cd5\u958b\u555f\u700f\u89bd\u5668");
+            AppendLog(ex.Message);
+        }
+    }
+
+    private async Task LoadPreviewThumbnailAsync(string? thumbnailUrl)
+    {
+        var version = Interlocked.Increment(ref _thumbnailLoadVersion);
+        if (string.IsNullOrWhiteSpace(thumbnailUrl))
+        {
+            ClearPreviewThumbnail();
+            return;
+        }
+
+        try
+        {
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(20) };
+            http.DefaultRequestHeaders.TryAddWithoutValidation(
+                "User-Agent",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36");
+            if (_parsedInfo is not null && IsBilibiliVideoUrl(_parsedInfo.Url))
+            {
+                http.DefaultRequestHeaders.TryAddWithoutValidation("Referer", "https://www.bilibili.com/");
+            }
+
+            var bytes = await http.GetByteArrayAsync(thumbnailUrl);
+            if (version != _thumbnailLoadVersion)
+            {
+                return;
+            }
+
+            using var ms = new MemoryStream(bytes);
+            var bitmap = new Bitmap(ms);
+            await Dispatcher.UIThread.InvokeAsync(() =>
+            {
+                if (version != _thumbnailLoadVersion)
+                {
+                    bitmap.Dispose();
+                    return;
+                }
+
+                _previewBitmap?.Dispose();
+                _previewBitmap = bitmap;
+                _previewImage.Source = bitmap;
+                _previewImage.IsVisible = true;
+                _previewThumbPlaceholder.IsVisible = false;
+            });
+        }
+        catch (Exception ex)
+        {
+            if (version == _thumbnailLoadVersion)
+            {
+                AppendLog($"\u7e2e\u5716\u8f09\u5165\u5931\u6557: {ex.Message}");
+                ClearPreviewThumbnail();
+            }
+        }
+    }
+
+    private void ClearPreviewThumbnail()
+    {
+        void Apply()
+        {
+            _previewImage.Source = null;
+            _previewImage.IsVisible = false;
+            _previewThumbPlaceholder.IsVisible = true;
+            _previewBitmap?.Dispose();
+            _previewBitmap = null;
+        }
+
+        if (Dispatcher.UIThread.CheckAccess())
+        {
+            Apply();
+        }
+        else
+        {
+            Dispatcher.UIThread.Post(Apply);
         }
     }
 
@@ -2706,6 +3349,7 @@ public sealed class MainWindow : Window
 
         foreach (var item in _downloadItems.AsEnumerable().Reverse().Take(8))
         {
+            DetachFromParent(item.Root);
             _downloadListPanel.Children.Add(item.Root);
         }
     }
@@ -2858,7 +3502,16 @@ public sealed class MainWindow : Window
     }
 
     private sealed record NavItem(string Id, Border Border);
-    private sealed record ParsedVideoInfo(string Title, double? DurationSeconds, long? ViewCount, string? UploadDate, string Url);
+    private sealed record ParsedVideoInfo(
+        string Title,
+        double? DurationSeconds,
+        long? ViewCount,
+        string? UploadDate,
+        string Url,
+        string? ThumbnailUrl = null,
+        string? WebpageUrl = null,
+        string? VideoId = null,
+        string? ExtractorKey = null);
 
     private enum DownloadState
     {
