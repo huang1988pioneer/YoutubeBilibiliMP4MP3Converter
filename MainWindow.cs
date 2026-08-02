@@ -77,6 +77,7 @@ public sealed class MainWindow : Window
     private readonly TextBlock _previewTitle;
     private readonly TextBlock _previewDuration;
     private readonly TextBlock _previewViews;
+    private readonly TextBlock _previewChannelFollowers;
     private readonly TextBlock _previewDate;
     private readonly TextBlock _previewStatus;
     private readonly TextBlock _queueCountText;
@@ -225,6 +226,7 @@ public sealed class MainWindow : Window
         };
         _previewDuration = MetaLine("\u6642\u9577", "-");
         _previewViews = MetaLine("\u6b21\u6578", "-");
+        _previewChannelFollowers = MetaLine("\u983b\u9053\u95dc\u6ce8", "-");
         _previewDate = MetaLine("\u65e5\u671f", "-");
         _previewStatus = new TextBlock
         {
@@ -1048,6 +1050,7 @@ public sealed class MainWindow : Window
         var meta = new StackPanel { Spacing = 4 };
         meta.Children.Add(_previewDuration);
         meta.Children.Add(_previewViews);
+        meta.Children.Add(_previewChannelFollowers);
         meta.Children.Add(_previewDate);
         body.Children.Add(meta);
 
@@ -1583,6 +1586,7 @@ public sealed class MainWindow : Window
             _previewTitle.Text = info.Title;
             _previewDuration.Text = $"\u6642\u9577:  {FormatDuration(info.DurationSeconds)}";
             _previewViews.Text = $"\u6b21\u6578:  {info.ViewCount?.ToString("N0") ?? "-"}";
+            _previewChannelFollowers.Text = $"\u983b\u9053\u95dc\u6ce8:  {info.ChannelFollowerCount?.ToString("N0") ?? "-"}";
             _previewDate.Text = $"\u65e5\u671f:  {info.UploadDate ?? "-"}";
             _previewStatus.Text = "\u89e3\u6790\u6210\u529f \u00b7 \u53ef\u5167\u5d4c\u64ad\u653e";
             _previewStatus.Foreground = Green;
@@ -1593,6 +1597,14 @@ public sealed class MainWindow : Window
             if (info.DurationSeconds is not null)
             {
                 AppendLog($"\u6642\u9577: {FormatDuration(info.DurationSeconds)}");
+            }
+            if (info.ViewCount is not null)
+            {
+                AppendLog($"\u89c0\u770b\u6b21\u6578: {info.ViewCount.Value:N0}");
+            }
+            if (info.ChannelFollowerCount is not null)
+            {
+                AppendLog($"\u983b\u9053\u95dc\u6ce8: {info.ChannelFollowerCount.Value:N0}");
             }
 
             _ = LoadPreviewThumbnailAsync(info.ThumbnailUrl);
@@ -1667,6 +1679,10 @@ public sealed class MainWindow : Window
             long? views = root.TryGetProperty("view_count", out var v) && v.ValueKind == JsonValueKind.Number
                 ? v.GetInt64()
                 : null;
+            long? channelFollowers = root.TryGetProperty("channel_follower_count", out var cf)
+                && cf.ValueKind == JsonValueKind.Number
+                ? cf.GetInt64()
+                : null;
             string? upload = null;
             if (root.TryGetProperty("upload_date", out var ud) && ud.GetString() is { Length: 8 } raw)
             {
@@ -1685,7 +1701,7 @@ public sealed class MainWindow : Window
                 ? ek.GetString()
                 : root.TryGetProperty("extractor", out var ex) ? ex.GetString() : null;
 
-            return new ParsedVideoInfo(title, duration, views, upload, url, thumbnail, webpage, id, extractor);
+            return new ParsedVideoInfo(title, duration, views, channelFollowers, upload, url, thumbnail, webpage, id, extractor);
         }
         catch (Exception ex)
         {
@@ -3506,6 +3522,7 @@ public sealed class MainWindow : Window
         string Title,
         double? DurationSeconds,
         long? ViewCount,
+        long? ChannelFollowerCount,
         string? UploadDate,
         string Url,
         string? ThumbnailUrl = null,
