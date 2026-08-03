@@ -50,6 +50,10 @@ public sealed class MainWindow : Window
     private static readonly IBrush RedYouTube = Brush.Parse("#FF0000");
     private static readonly IBrush PinkBili = Brush.Parse("#FB7299");
     private static readonly IBrush PinkBiliSoft = Brush.Parse("#FFE8F0");
+    // WebView2 initialization can throw asynchronously on Windows when its profile
+    // directory is unavailable. Keep the converter usable and open the original page
+    // in the system browser instead of allowing that failure to terminate the app.
+    private static readonly bool EmbeddedPreviewEnabled = !RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
 
     private readonly List<NavItem> _navItems = [];
     private readonly List<DownloadItemView> _downloadItems = [];
@@ -1028,7 +1032,10 @@ public sealed class MainWindow : Window
         };
 
         var playerGrid = new Grid();
-        playerGrid.Children.Add(_previewWebView);
+        if (EmbeddedPreviewEnabled)
+        {
+            playerGrid.Children.Add(_previewWebView);
+        }
         playerGrid.Children.Add(_previewOverlay);
         _previewPlayerHost.Child = playerGrid;
         body.Children.Add(_previewPlayerHost);
@@ -1570,7 +1577,9 @@ public sealed class MainWindow : Window
 
         try
         {
-            var info = await DumpVideoInfoAsync(ytDlpPath, urls[0]);
+            var info = IsYouTubeChannelUrl(urls[0])
+                ? await DumpChannelInfoAsync(ytDlpPath, urls[0])
+                : await DumpVideoInfoAsync(ytDlpPath, urls[0]);
             if (info is null)
             {
                 SetStatus("\u89e3\u6790\u5931\u6557\uff0c\u8acb\u6aa2\u67e5\u7db2\u5740\u6216\u7a0d\u5f8c\u518d\u8a66");
@@ -1585,12 +1594,16 @@ public sealed class MainWindow : Window
             _parsedInfo = info;
             _previewTitle.Text = info.Title;
             _previewDuration.Text = $"\u6642\u9577:  {FormatDuration(info.DurationSeconds)}";
-            _previewViews.Text = $"\u6b21\u6578:  {info.ViewCount?.ToString("N0") ?? "-"}";
+            _previewViews.Text = info.IsChannel
+                ? "\u5f71\u7247\u89c0\u770b:  -"
+                : $"\u6b21\u6578:  {info.ViewCount?.ToString("N0") ?? "-"}";
             _previewChannelFollowers.Text = $"\u983b\u9053\u95dc\u6ce8:  {info.ChannelFollowerCount?.ToString("N0") ?? "-"}";
             _previewDate.Text = $"\u65e5\u671f:  {info.UploadDate ?? "-"}";
-            _previewStatus.Text = "\u89e3\u6790\u6210\u529f \u00b7 \u53ef\u5167\u5d4c\u64ad\u653e";
+            _previewStatus.Text = info.IsChannel
+                ? "\u983b\u9053\u8cc7\u8a0a\u89e3\u6790\u6210\u529f"
+                : "\u89e3\u6790\u6210\u529f \u00b7 \u53ef\u5167\u5d4c\u64ad\u653e";
             _previewStatus.Foreground = Green;
-            _previewPlayButton.IsEnabled = true;
+            _previewPlayButton.IsEnabled = !info.IsChannel;
             _previewBrowserButton.IsEnabled = true;
             SetStatus($"\u89e3\u6790\u6210\u529f\uff1a{info.Title}");
             AppendLog($"\u6a19\u984c: {info.Title}");
@@ -1608,8 +1621,11 @@ public sealed class MainWindow : Window
             }
 
             _ = LoadPreviewThumbnailAsync(info.ThumbnailUrl);
-            // Auto-load the embedded original player (user can press play in-player).
-            StartEmbeddedPreview(autoplay: false);
+            if (!info.IsChannel)
+            {
+                // Auto-load the embedded original player (user can press play in-player).
+                StartEmbeddedPreview(autoplay: false);
+            }
         }
         catch (Exception ex)
         {
@@ -1701,13 +1717,91 @@ public sealed class MainWindow : Window
                 ? ek.GetString()
                 : root.TryGetProperty("extractor", out var ex) ? ex.GetString() : null;
 
-            return new ParsedVideoInfo(title, duration, views, channelFollowers, upload, url, thumbnail, webpage, id, extractor);
+            var channelName = root.TryGetProperty("channel", out var channel) ? channel.GetString() : null;
+            if (string.IsNullOrWhiteSpace(channelName) && root.TryGetProperty("uploader", out var uploader))
+            {
+                channelName = uploader.GetString();
+            }
+
+            return new ParsedVideoInfo(title, duration, views, channelFollowers, upload, url, thumbnail, webpage, id, extractor, channelName);
         }
         catch (Exception ex)
         {
             AppendLog($"JSON \u89e3\u6790\u5931\u6557: {ex.Message}");
             return null;
         }
+    }
+
+    private async Task<ParsedVideoInfo?> DumpChannelInfoAsync(string ytDlpPath, string channelUrl)
+    {
+        var sampleVideoUrl = await FindChannelSampleVideoUrlAsync(ytDlpPath, channelUrl);
+        if (string.IsNullOrWhiteSpace(sampleVideoUrl))
+        {
+            AppendLog("\u7121\u6cd5\u5f9e\u983b\u9053\u53d6\u5f97\u516c\u958b\u5f71\u7247\uff0c\u7121\u6cd5\u8b80\u53d6\u8a02\u95b1\u6578\u3002");
+            return null;
+        }
+
+        var sampleInfo = await DumpVideoInfoAsync(ytDlpPath, sampleVideoUrl);
+        if (sampleInfo is null)
+        {
+            return null;
+        }
+
+        var channelName = sampleInfo.ChannelName ?? sampleInfo.Title;
+        return sampleInfo with
+        {
+            Title = $"\u983b\u9053\uff1a{channelName}",
+            DurationSeconds = null,
+            ViewCount = null,
+            UploadDate = null,
+            Url = channelUrl,
+            WebpageUrl = channelUrl,
+            IsChannel = true
+        };
+    }
+
+    private async Task<string?> FindChannelSampleVideoUrlAsync(string ytDlpPath, string channelUrl)
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = ytDlpPath,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+        startInfo.Environment["PYTHONIOENCODING"] = "utf-8";
+        startInfo.Environment["PYTHONUTF8"] = "1";
+        startInfo.ArgumentList.Add("--flat-playlist");
+        startInfo.ArgumentList.Add("--playlist-end");
+        startInfo.ArgumentList.Add("1");
+        startInfo.ArgumentList.Add("--skip-download");
+        startInfo.ArgumentList.Add("--no-warnings");
+        startInfo.ArgumentList.Add("--print");
+        startInfo.ArgumentList.Add("%(webpage_url)s");
+        startInfo.ArgumentList.Add(channelUrl);
+
+        using var process = new Process { StartInfo = startInfo };
+        if (!process.Start())
+        {
+            return null;
+        }
+
+        var stdout = await process.StandardOutput.ReadToEndAsync();
+        var stderr = await process.StandardError.ReadToEndAsync();
+        await process.WaitForExitAsync();
+        if (process.ExitCode != 0)
+        {
+            if (!string.IsNullOrWhiteSpace(stderr))
+            {
+                AppendLog(stderr.Trim());
+            }
+
+            return null;
+        }
+
+        return stdout.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .FirstOrDefault(value => Uri.TryCreate(value, UriKind.Absolute, out _));
     }
 
     private static string? ExtractThumbnailUrl(JsonElement root)
@@ -1782,6 +1876,24 @@ public sealed class MainWindow : Window
         if (_parsedInfo is null)
         {
             SetStatus("\u8acb\u5148\u89e3\u6790\u5f71\u7247");
+            return;
+        }
+
+        if (!EmbeddedPreviewEnabled)
+        {
+            _embeddedPreviewActive = false;
+            _previewWebView.IsVisible = false;
+            _previewOverlay.IsVisible = true;
+            _previewStopButton.IsEnabled = false;
+            _previewStatus.Text = "Windows \u5df2\u6539\u7528\u7a69\u5b9a\u7684\u539f\u9801\u64ad\u653e";
+            _previewStatus.Foreground = TextMuted;
+            SetStatus("\u5167\u5d4c\u9810\u89bd\u5728 Windows \u5df2\u505c\u7528\uff1b\u8acb\u7528\u300c\u539f\u9801\u300d\u958b\u555f\u5f71\u7247");
+
+            if (autoplay)
+            {
+                OpenOriginalPage(_parsedInfo.WebpageUrl ?? _parsedInfo.Url);
+            }
+
             return;
         }
 
@@ -1991,6 +2103,22 @@ public sealed class MainWindow : Window
         return url.Contains("youtube.com", StringComparison.OrdinalIgnoreCase)
             || url.Contains("youtu.be", StringComparison.OrdinalIgnoreCase)
             || url.Contains("youtube-nocookie.com", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsYouTubeChannelUrl(string url)
+    {
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri)
+            || !(uri.Host.Contains("youtube.com", StringComparison.OrdinalIgnoreCase)
+                || uri.Host.Equals("youtu.be", StringComparison.OrdinalIgnoreCase)))
+        {
+            return false;
+        }
+
+        var path = uri.AbsolutePath;
+        return path.StartsWith("/@", StringComparison.OrdinalIgnoreCase)
+            || path.StartsWith("/channel/", StringComparison.OrdinalIgnoreCase)
+            || path.StartsWith("/c/", StringComparison.OrdinalIgnoreCase)
+            || path.StartsWith("/user/", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string? GetQueryParameter(Uri uri, string name)
@@ -3528,7 +3656,9 @@ public sealed class MainWindow : Window
         string? ThumbnailUrl = null,
         string? WebpageUrl = null,
         string? VideoId = null,
-        string? ExtractorKey = null);
+        string? ExtractorKey = null,
+        string? ChannelName = null,
+        bool IsChannel = false);
 
     private enum DownloadState
     {
