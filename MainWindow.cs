@@ -91,6 +91,10 @@ public sealed class MainWindow : Window
     private readonly Ellipse _mp4Radio;
     private readonly Ellipse _mp3Radio;
     private readonly CheckBox _subtitleCheckBox;
+    private readonly TextBlock _cookiesPathLabel;
+    private readonly Button _cookiesBrowseButton;
+    private readonly Button _cookiesClearButton;
+    private string? _cookiesFilePath;
 
     private string _outputFormat = "MP4";
     private string _mp4Quality = "1080P";
@@ -105,6 +109,11 @@ public sealed class MainWindow : Window
     private Bitmap? _previewBitmap;
     private int _thumbnailLoadVersion;
     private bool _embeddedPreviewActive;
+    private bool _previewAdapterReady;
+    private string? _previewReferer;
+    private string? _pendingEmbedHtml;
+    private Uri? _pendingEmbedBaseUri;
+    private Uri? _pendingDirectEmbedUri;
 
     // UI update throttling — high-frequency yt-dlp output previously flooded the UI thread
     // and froze/crashed the app during download.
@@ -219,6 +228,31 @@ public sealed class MainWindow : Window
                 : "\u5df2\u95dc\u9589\u5b57\u5e55\u642d\u914d");
         };
 
+        _cookiesFilePath = settings.CookieFilePath;
+
+        _cookiesPathLabel = new TextBlock
+        {
+            Text = string.IsNullOrEmpty(_cookiesFilePath) ? "\u672a\u8a2d\u5b9a" : IoPath.GetFileName(_cookiesFilePath),
+            FontSize = 12,
+            Foreground = string.IsNullOrEmpty(_cookiesFilePath) ? TextMuted : TextPrimary,
+            VerticalAlignment = VerticalAlignment.Center,
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            MaxWidth = 180
+        };
+
+        _cookiesBrowseButton = CreateSoftButton("\u532f\u5165", 72);
+        _cookiesBrowseButton.Click += ChooseCookiesFileAsync;
+
+        _cookiesClearButton = CreateSoftButton("\u6e05\u9664", 72);
+        _cookiesClearButton.Click += (_, _) =>
+        {
+            _cookiesFilePath = null;
+            _cookiesPathLabel.Text = "\u672a\u8a2d\u5b9a";
+            _cookiesPathLabel.Foreground = TextMuted;
+            SaveSettingsIfPossible();
+            SetStatus("\u5df2\u6e05\u9664 Cookies \u6a94\u6848");
+        };
+
         _previewTitle = new TextBlock
         {
             Text = "\u5c1a\u672a\u89e3\u6790\u5f71\u7247",
@@ -260,25 +294,31 @@ public sealed class MainWindow : Window
         {
             IsVisible = false,
             HorizontalAlignment = HorizontalAlignment.Stretch,
-            VerticalAlignment = VerticalAlignment.Stretch
+            VerticalAlignment = VerticalAlignment.Stretch,
+            // Desktop WebViews often omit a browser-like UA; some players refuse embeds.
+            UserAgent =
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
+        };
+        _previewWebView.AdapterCreated += (_, _) =>
+        {
+            _previewAdapterReady = true;
+            FlushPendingEmbeddedPreview();
+        };
+        _previewWebView.AdapterDestroyed += (_, _) =>
+        {
+            _previewAdapterReady = false;
         };
         _previewWebView.NavigationCompleted += OnPreviewNavigationCompleted;
+        _previewWebView.WebResourceRequested += OnPreviewWebResourceRequested;
         _previewWebView.NewWindowRequested += (_, e) =>
         {
             // Keep playback inside the embedded player when possible.
             e.Handled = true;
             try
             {
-                var requested = e.GetType().GetProperty("Uri")?.GetValue(e)
-                    ?? e.GetType().GetProperty("RequestUri")?.GetValue(e)
-                    ?? e.GetType().GetProperty("Target")?.GetValue(e);
-                if (requested is Uri uri)
+                if (e.Request is not null)
                 {
-                    _previewWebView.Navigate(uri);
-                }
-                else if (requested is string s && Uri.TryCreate(s, UriKind.Absolute, out var parsed))
-                {
-                    _previewWebView.Navigate(parsed);
+                    _previewWebView.Navigate(e.Request);
                 }
             }
             catch
@@ -966,6 +1006,26 @@ public sealed class MainWindow : Window
         left.Children.Add(qualityPanel);
         left.Children.Add(_subtitleCheckBox);
 
+        // Cookies file import row
+        left.Children.Add(new TextBlock
+        {
+            Text = "Cookies \u6a94\u6848\uff08\u6703\u54e1\u9650\u5b9a\u5f71\u7247\uff09",
+            FontSize = 13,
+            FontWeight = FontWeight.SemiBold,
+            Foreground = TextPrimary,
+            Margin = new Thickness(0, 4, 0, 0)
+        });
+        var cookiesRow = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 8,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        cookiesRow.Children.Add(_cookiesPathLabel);
+        cookiesRow.Children.Add(_cookiesBrowseButton);
+        cookiesRow.Children.Add(_cookiesClearButton);
+        left.Children.Add(cookiesRow);
+
         left.Children.Add(new TextBlock
         {
             Text = "\u5132\u5b58\u4f4d\u7f6e",
@@ -1548,6 +1608,31 @@ public sealed class MainWindow : Window
         }
     }
 
+    private async void ChooseCookiesFileAsync(object? sender, RoutedEventArgs e)
+    {
+        var files = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+        {
+            Title = "\u9078\u64c7 cookies.txt \u6a94\u6848",
+            AllowMultiple = false,
+            FileTypeFilter =
+            [
+                new FilePickerFileType("Cookie Files") { Patterns = ["*.txt"] },
+                new FilePickerFileType("All Files") { Patterns = ["*"] }
+            ]
+        });
+
+        var file = files.FirstOrDefault();
+        if (file is not null && file.TryGetLocalPath() is { } path)
+        {
+            _cookiesFilePath = path;
+            _cookiesPathLabel.Text = IoPath.GetFileName(path);
+            _cookiesPathLabel.Foreground = TextPrimary;
+            SaveSettingsIfPossible();
+            SetStatus($"\u5df2\u532f\u5165 Cookies: {IoPath.GetFileName(path)}");
+            AppendLog($"Cookies file: {path}");
+        }
+    }
+
     private async void ParseUrlAsync(object? sender, RoutedEventArgs e) => await ParseUrlCoreAsync();
 
     private async Task ParseUrlCoreAsync()
@@ -1661,6 +1746,8 @@ public sealed class MainWindow : Window
         {
             AppendLog($"Bilibili cookies: {cookieBrowser}");
         }
+
+        AddCookiesFileArgument(startInfo, url);
 
         startInfo.ArgumentList.Add(NormalizeMediaUrl(url));
 
@@ -1909,7 +1996,7 @@ public sealed class MainWindow : Window
         {
             _previewWebView.IsVisible = true;
             _previewOverlay.IsVisible = false;
-            _previewWebView.Source = embed;
+            LoadEmbeddedPlayer(embed);
             _embeddedPreviewActive = true;
             _previewStopButton.IsEnabled = true;
             _previewPlayButton.IsEnabled = true;
@@ -1932,8 +2019,184 @@ public sealed class MainWindow : Window
         }
     }
 
+    private void LoadEmbeddedPlayer(Uri embedUri)
+    {
+        var baseUri = GetEmbedBaseUri(embedUri);
+        _previewReferer = baseUri.AbsoluteUri;
+
+        // Official embed endpoints can be wrapped in local HTML (for Referer/origin).
+        // Full watch pages often send X-Frame-Options and must be loaded directly.
+        if (IsFramableEmbedUri(embedUri))
+        {
+            _pendingEmbedHtml = BuildEmbedPlayerHtml(embedUri);
+            _pendingEmbedBaseUri = baseUri;
+            _pendingDirectEmbedUri = null;
+        }
+        else
+        {
+            _pendingEmbedHtml = null;
+            _pendingEmbedBaseUri = null;
+            _pendingDirectEmbedUri = embedUri;
+        }
+
+        // Native adapter may not exist yet (first show). Keep pending and also try now;
+        // AdapterCreated will flush again when the platform WebView is ready.
+        FlushPendingEmbeddedPreview();
+    }
+
+    private static bool IsFramableEmbedUri(Uri uri)
+    {
+        var host = uri.Host.ToLowerInvariant();
+        var path = uri.AbsolutePath;
+        if (host.Contains("youtube", StringComparison.Ordinal) || host.Contains("youtube-nocookie", StringComparison.Ordinal))
+        {
+            return path.Contains("/embed/", StringComparison.OrdinalIgnoreCase);
+        }
+
+        if (host.Contains("player.bilibili.com", StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    private void FlushPendingEmbeddedPreview()
+    {
+        if (_pendingDirectEmbedUri is not null)
+        {
+            var direct = _pendingDirectEmbedUri;
+            try
+            {
+                _previewWebView.Source = direct;
+                _pendingDirectEmbedUri = null;
+            }
+            catch (Exception ex)
+            {
+                if (!_previewAdapterReady)
+                {
+                    return;
+                }
+
+                AppendLog($"\u76f4\u63a5\u5167\u5d4c\u5931\u6557: {ex.Message}");
+                _pendingDirectEmbedUri = null;
+            }
+
+            return;
+        }
+
+        if (_pendingEmbedHtml is null || _pendingEmbedBaseUri is null)
+        {
+            return;
+        }
+
+        var html = _pendingEmbedHtml;
+        var baseUri = _pendingEmbedBaseUri;
+
+        try
+        {
+            // NavigateToString + baseUri gives the player a real origin/referrer.
+            // Direct embed navigation in WKWebView often fails with YouTube Error 153
+            // ("Video player configuration error") when Referer is empty.
+            _previewWebView.NavigateToString(html, baseUri);
+            _pendingEmbedHtml = null;
+            _pendingEmbedBaseUri = null;
+        }
+        catch (Exception ex)
+        {
+            if (!_previewAdapterReady)
+            {
+                // Wait for AdapterCreated; keep pending HTML.
+                return;
+            }
+
+            AppendLog($"NavigateToString \u5931\u6557\uff0c\u6539\u7528\u76f4\u63a5\u5167\u5d4c: {ex.Message}");
+            _pendingEmbedHtml = null;
+            _pendingEmbedBaseUri = null;
+            try
+            {
+                _previewWebView.Source = ExtractIframeSrc(html) ?? baseUri;
+            }
+            catch (Exception fallbackEx)
+            {
+                AppendLog($"\u76f4\u63a5\u5167\u5d4c\u4e5f\u5931\u6557: {fallbackEx.Message}");
+            }
+        }
+    }
+
+    private static Uri GetEmbedBaseUri(Uri embedUri)
+    {
+        var host = embedUri.Host.ToLowerInvariant();
+        if (host.Contains("bilibili", StringComparison.Ordinal)
+            || host.Contains("bilivideo", StringComparison.Ordinal)
+            || host.Contains("hdslb", StringComparison.Ordinal))
+        {
+            return new Uri("https://www.bilibili.com/");
+        }
+
+        if (host.Contains("youtu", StringComparison.Ordinal)
+            || host.Contains("google", StringComparison.Ordinal)
+            || host.Contains("ytimg", StringComparison.Ordinal)
+            || host.Contains("ggpht", StringComparison.Ordinal))
+        {
+            return new Uri("https://www.youtube.com/");
+        }
+
+        return new Uri($"{embedUri.Scheme}://{embedUri.Host}/");
+    }
+
+    private static string BuildEmbedPlayerHtml(Uri embedUri)
+    {
+        var src = System.Net.WebUtility.HtmlEncode(embedUri.AbsoluteUri);
+        // Avoid raw-string brace escaping pitfalls; keep markup simple for WebView loadHTMLString.
+        return
+            "<!DOCTYPE html><html><head><meta charset=\"utf-8\" />" +
+            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1, maximum-scale=1\" />" +
+            "<meta name=\"referrer\" content=\"strict-origin-when-cross-origin\" />" +
+            "<style>html,body{margin:0;padding:0;width:100%;height:100%;background:#000;overflow:hidden}" +
+            "iframe{border:0;width:100%;height:100%;display:block;background:#000}</style></head><body>" +
+            "<iframe src=\"" + src + "\" title=\"video\" " +
+            "allow=\"accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share; fullscreen\" " +
+            "allowfullscreen referrerpolicy=\"strict-origin-when-cross-origin\" loading=\"eager\"></iframe>" +
+            "</body></html>";
+    }
+
+    private static Uri? ExtractIframeSrc(string html)
+    {
+        var match = Regex.Match(html, "src=\"([^\"]+)\"", RegexOptions.IgnoreCase);
+        if (match.Success && Uri.TryCreate(System.Net.WebUtility.HtmlDecode(match.Groups[1].Value), UriKind.Absolute, out var uri))
+        {
+            return uri;
+        }
+
+        return null;
+    }
+
+    private void OnPreviewWebResourceRequested(object? sender, WebResourceRequestedEventArgs e)
+    {
+        if (string.IsNullOrWhiteSpace(_previewReferer) || e.Request?.Headers is null)
+        {
+            return;
+        }
+
+        try
+        {
+            // YouTube/Bilibili reject embeds with an empty Referer (e.g. YouTube Error 153).
+            e.Request.Headers.TrySet("Referer", _previewReferer);
+        }
+        catch
+        {
+            // Headers may be read-only for some request types/platforms.
+        }
+    }
+
     private void StopEmbeddedPreview(bool clearStatus = true)
     {
+        _pendingEmbedHtml = null;
+        _pendingEmbedBaseUri = null;
+        _pendingDirectEmbedUri = null;
+        _previewReferer = null;
+
         try
         {
             if (_embeddedPreviewActive || _previewWebView.IsVisible)
@@ -1981,6 +2244,10 @@ public sealed class MainWindow : Window
         _previewStatus.Text = "\u5167\u5d4c\u8f09\u5165\u5931\u6557";
         _previewStatus.Foreground = Brush.Parse("#EF4444");
         AppendLog("\u5167\u5d4c\u7db2\u9801\u8f09\u5165\u5931\u6557\uff0c\u53ef\u6539\u7528\u300c\u539f\u9801\u300d");
+        if (e.Request is not null)
+        {
+            AppendLog($"\u5167\u5d4c\u5931\u6557 URL: {e.Request}");
+        }
     }
 
     private static Uri? TryBuildEmbedUri(ParsedVideoInfo info, bool autoplay)
@@ -1997,8 +2264,9 @@ public sealed class MainWindow : Window
                 || extractor.Contains("YouTube", StringComparison.OrdinalIgnoreCase)
                 || IsYouTubeUrl(page))
             {
+                // youtube-nocookie + origin helps desktop WebViews pass YouTube embed checks.
                 return new Uri(
-                    $"https://www.youtube.com/embed/{Uri.EscapeDataString(id)}?autoplay={ap}&rel=0&modestbranding=1&playsinline=1");
+                    $"https://www.youtube-nocookie.com/embed/{Uri.EscapeDataString(id)}?autoplay={ap}&rel=0&modestbranding=1&playsinline=1&enablejsapi=1&origin={Uri.EscapeDataString("https://www.youtube.com")}");
             }
 
             if (extractor.Contains("Bili", StringComparison.OrdinalIgnoreCase) || IsBilibiliVideoUrl(page))
@@ -2006,20 +2274,20 @@ public sealed class MainWindow : Window
                 if (id.StartsWith("BV", StringComparison.OrdinalIgnoreCase))
                 {
                     return new Uri(
-                        $"https://player.bilibili.com/player.html?bvid={Uri.EscapeDataString(id)}&autoplay={ap}&high_quality=1&danmaku=0");
+                        $"https://player.bilibili.com/player.html?isOutside=true&bvid={Uri.EscapeDataString(id)}&autoplay={ap}&high_quality=1&danmaku=0&as_wide=1");
                 }
 
                 if (id.StartsWith("av", StringComparison.OrdinalIgnoreCase)
                     && long.TryParse(id.AsSpan(2), out _))
                 {
                     return new Uri(
-                        $"https://player.bilibili.com/player.html?aid={Uri.EscapeDataString(id[2..])}&autoplay={ap}&high_quality=1&danmaku=0");
+                        $"https://player.bilibili.com/player.html?isOutside=true&aid={Uri.EscapeDataString(id[2..])}&autoplay={ap}&high_quality=1&danmaku=0&as_wide=1");
                 }
 
                 if (long.TryParse(id, out _))
                 {
                     return new Uri(
-                        $"https://player.bilibili.com/player.html?aid={Uri.EscapeDataString(id)}&autoplay={ap}&high_quality=1&danmaku=0");
+                        $"https://player.bilibili.com/player.html?isOutside=true&aid={Uri.EscapeDataString(id)}&autoplay={ap}&high_quality=1&danmaku=0&as_wide=1");
                 }
             }
         }
@@ -2044,7 +2312,7 @@ public sealed class MainWindow : Window
             if (!string.IsNullOrWhiteSpace(id))
             {
                 return new Uri(
-                    $"https://www.youtube.com/embed/{Uri.EscapeDataString(id)}?autoplay={ap}&rel=0&modestbranding=1&playsinline=1");
+                    $"https://www.youtube-nocookie.com/embed/{Uri.EscapeDataString(id)}?autoplay={ap}&rel=0&modestbranding=1&playsinline=1&enablejsapi=1&origin={Uri.EscapeDataString("https://www.youtube.com")}");
             }
         }
 
@@ -2067,7 +2335,7 @@ public sealed class MainWindow : Window
             if (!string.IsNullOrWhiteSpace(id))
             {
                 return new Uri(
-                    $"https://www.youtube.com/embed/{Uri.EscapeDataString(id)}?autoplay={ap}&rel=0&modestbranding=1&playsinline=1");
+                    $"https://www.youtube-nocookie.com/embed/{Uri.EscapeDataString(id)}?autoplay={ap}&rel=0&modestbranding=1&playsinline=1&enablejsapi=1&origin={Uri.EscapeDataString("https://www.youtube.com")}");
             }
         }
 
@@ -2078,14 +2346,14 @@ public sealed class MainWindow : Window
             if (bv.Success)
             {
                 return new Uri(
-                    $"https://player.bilibili.com/player.html?bvid={Uri.EscapeDataString(bv.Value)}&autoplay={ap}&high_quality=1&danmaku=0");
+                    $"https://player.bilibili.com/player.html?isOutside=true&bvid={Uri.EscapeDataString(bv.Value)}&autoplay={ap}&high_quality=1&danmaku=0&as_wide=1");
             }
 
             var av = Regex.Match(pageUrl, @"av(\d+)", RegexOptions.IgnoreCase);
             if (av.Success)
             {
                 return new Uri(
-                    $"https://player.bilibili.com/player.html?aid={av.Groups[1].Value}&autoplay={ap}&high_quality=1&danmaku=0");
+                    $"https://player.bilibili.com/player.html?isOutside=true&aid={av.Groups[1].Value}&autoplay={ap}&high_quality=1&danmaku=0&as_wide=1");
             }
         }
 
@@ -2493,6 +2761,8 @@ public sealed class MainWindow : Window
             AppendLog($"Bilibili cookies: {cookieBrowser}");
         }
 
+        AddCookiesFileArgument(startInfo, url);
+
         if (outputFormat == "MP3")
         {
             startInfo.ArgumentList.Add("--embed-thumbnail");
@@ -2566,6 +2836,7 @@ public sealed class MainWindow : Window
             startInfo.ArgumentList.Add("%(title)s.%(ext)s");
             AddBilibiliBrowserHeaders(startInfo, url);
             AddBilibiliBrowserCookies(startInfo, url);
+            AddCookiesFileArgument(startInfo, url);
             startInfo.ArgumentList.Add(url);
 
             var code = await RunProcessAsync(startInfo, token, item);
@@ -3155,6 +3426,23 @@ public sealed class MainWindow : Window
         return browser;
     }
 
+    private void AddCookiesFileArgument(ProcessStartInfo startInfo, string url)
+    {
+        if (string.IsNullOrEmpty(_cookiesFilePath) || !File.Exists(_cookiesFilePath))
+        {
+            return;
+        }
+
+        // If Bilibili browser cookies were already added, skip the file-based cookies.
+        if (IsBilibiliVideoUrl(url))
+        {
+            return;
+        }
+
+        startInfo.ArgumentList.Add("--cookies");
+        startInfo.ArgumentList.Add(_cookiesFilePath);
+    }
+
     private static string? FindBrowserForCookies()
     {
         if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
@@ -3513,7 +3801,8 @@ public sealed class MainWindow : Window
             _mp4Quality,
             _todayDownloads,
             DateOnly.FromDateTime(DateTime.Now),
-            _includeSubtitles);
+            _includeSubtitles,
+            _cookiesFilePath);
     }
 
     private static string NormalizeMp4Quality(string? quality)
@@ -3886,6 +4175,7 @@ internal sealed class AppSettings
     public bool? IncludeSubtitles { get; init; } = false;
     public int TodayDownloadCount { get; init; }
     public DateOnly TodayDate { get; init; } = DateOnly.FromDateTime(DateTime.Now);
+    public string? CookieFilePath { get; init; }
 
     public static AppSettings Load()
     {
@@ -3909,7 +4199,10 @@ internal sealed class AppSettings
                         // Missing property in older settings.json => default off.
                         IncludeSubtitles = settings.IncludeSubtitles ?? false,
                         TodayDownloadCount = settings.TodayDate == today ? settings.TodayDownloadCount : 0,
-                        TodayDate = today
+                        TodayDate = today,
+                        CookieFilePath = !string.IsNullOrEmpty(settings.CookieFilePath) && File.Exists(settings.CookieFilePath)
+                            ? settings.CookieFilePath
+                            : null
                     };
                 }
             }
@@ -3929,7 +4222,8 @@ internal sealed class AppSettings
         string mp4Quality,
         int todayDownloadCount = 0,
         DateOnly? todayDate = null,
-        bool includeSubtitles = false)
+        bool includeSubtitles = false,
+        string? cookieFilePath = null)
     {
         try
         {
@@ -3942,7 +4236,8 @@ internal sealed class AppSettings
                 Mp4Quality = NormalizeQuality(mp4Quality),
                 IncludeSubtitles = includeSubtitles,
                 TodayDownloadCount = todayDownloadCount,
-                TodayDate = todayDate ?? DateOnly.FromDateTime(DateTime.Now)
+                TodayDate = todayDate ?? DateOnly.FromDateTime(DateTime.Now),
+                CookieFilePath = cookieFilePath
             };
             var json = JsonSerializer.Serialize(settings, new JsonSerializerOptions { WriteIndented = true });
             File.WriteAllText(SettingsPath, json);
