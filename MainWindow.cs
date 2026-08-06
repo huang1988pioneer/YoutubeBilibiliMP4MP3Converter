@@ -114,6 +114,8 @@ public sealed class MainWindow : Window
     private string? _pendingEmbedHtml;
     private Uri? _pendingEmbedBaseUri;
     private Uri? _pendingDirectEmbedUri;
+    private CancellationTokenSource? _previewLoadCts;
+    private int _previewStreamVersion;
 
     // UI update throttling — high-frequency yt-dlp output previously flooded the UI thread
     // and froze/crashed the app during download.
@@ -1708,8 +1710,8 @@ public sealed class MainWindow : Window
             _ = LoadPreviewThumbnailAsync(info.ThumbnailUrl);
             if (!info.IsChannel)
             {
-                // Auto-load the embedded original player (user can press play in-player).
-                StartEmbeddedPreview(autoplay: false);
+                // Auto-load a local HTML5 stream preview (avoids YouTube embed 152/153 blocks).
+                _ = StartEmbeddedPreviewAsync(autoplay: false);
             }
         }
         catch (Exception ex)
@@ -1955,10 +1957,10 @@ public sealed class MainWindow : Window
             }
         }
 
-        StartEmbeddedPreview(autoplay: true);
+        await StartEmbeddedPreviewAsync(autoplay: true);
     }
 
-    private void StartEmbeddedPreview(bool autoplay)
+    private async Task StartEmbeddedPreviewAsync(bool autoplay)
     {
         if (_parsedInfo is null)
         {
@@ -1984,22 +1986,53 @@ public sealed class MainWindow : Window
             return;
         }
 
-        var embed = TryBuildEmbedUri(_parsedInfo, autoplay);
-        if (embed is null)
-        {
-            SetStatus("\u7121\u6cd5\u5efa\u7acb\u5167\u5d4c\u64ad\u653e\u7db2\u5740\uff0c\u6539\u70ba\u958b\u555f\u539f\u9801");
-            OpenOriginalPage(_parsedInfo.WebpageUrl ?? _parsedInfo.Url);
-            return;
-        }
+        var version = Interlocked.Increment(ref _previewStreamVersion);
+        _previewLoadCts?.Cancel();
+        _previewLoadCts?.Dispose();
+        _previewLoadCts = new CancellationTokenSource();
+        var token = _previewLoadCts.Token;
 
         try
         {
             _previewWebView.IsVisible = true;
             _previewOverlay.IsVisible = false;
-            LoadEmbeddedPlayer(embed);
             _embeddedPreviewActive = true;
             _previewStopButton.IsEnabled = true;
             _previewPlayButton.IsEnabled = true;
+            _previewStatus.Text = "\u6b63\u5728\u53d6\u5f97\u9810\u89bd\u4e32\u6d41...";
+            _previewStatus.Foreground = Blue;
+            SetStatus("\u6b63\u5728\u53d6\u5f97\u53ef\u64ad\u653e\u7684\u9810\u89bd\u4e32\u6d41...");
+
+            // Prefer progressive stream + HTML5 <video>. YouTube iframe embeds often fail in
+            // desktop WebViews with Error 152-4 / 153 ("watch on YouTube" / config error).
+            var stream = await ResolvePreviewStreamAsync(_parsedInfo, token).ConfigureAwait(true);
+            if (version != _previewStreamVersion || token.IsCancellationRequested)
+            {
+                return;
+            }
+
+            if (stream is not null)
+            {
+                LoadHtml5VideoPreview(stream, autoplay);
+                _previewStatus.Text = autoplay ? "\u9810\u89bd\u64ad\u653e\u4e2d" : "\u9810\u89bd\u5df2\u5c31\u7dd2\uff0c\u53ef\u9ede\u64ad\u653e";
+                _previewStatus.Foreground = Green;
+                SetStatus(autoplay
+                    ? "\u6b63\u5728\u64ad\u653e\u9810\u89bd\u4e32\u6d41"
+                    : "\u9810\u89bd\u4e32\u6d41\u5df2\u8f09\u5165\uff0c\u53ef\u76f4\u63a5\u9ede\u64ad\u653e");
+                AppendLog($"\u9810\u89bd\u4e32\u6d41: {TruncateForLog(stream.Url, 120)}");
+                return;
+            }
+
+            // Fallback: platform embed player (mostly useful for Bilibili).
+            var embed = TryBuildEmbedUri(_parsedInfo, autoplay);
+            if (embed is null)
+            {
+                SetStatus("\u7121\u6cd5\u5efa\u7acb\u9810\u89bd\uff0c\u6539\u70ba\u958b\u555f\u539f\u9801");
+                OpenOriginalPage(_parsedInfo.WebpageUrl ?? _parsedInfo.Url);
+                return;
+            }
+
+            LoadEmbeddedPlayer(embed);
             _previewStatus.Text = autoplay
                 ? "\u5167\u5d4c\u64ad\u653e\u4e2d"
                 : "\u5167\u5d4c\u64ad\u653e\u5668\u5df2\u8f09\u5165";
@@ -2007,16 +2040,123 @@ public sealed class MainWindow : Window
             SetStatus(autoplay
                 ? "\u6b63\u5728\u5167\u5d4c\u64ad\u653e\u539f\u5f71\u7247"
                 : "\u5df2\u5167\u5d4c\u539f\u5f71\u7247\u64ad\u653e\u5668\uff0c\u53ef\u76f4\u63a5\u9ede\u64ad\u653e");
-            AppendLog($"\u5167\u5d4c\u9810\u89bd: {embed}");
+            AppendLog($"\u5167\u5d4c\u9810\u89bd\uff08\u5099\u7528\uff09: {embed}");
+        }
+        catch (OperationCanceledException)
+        {
+            // ignored — user stopped or re-parsed
         }
         catch (Exception ex)
         {
-            AppendLog($"\u5167\u5d4c\u64ad\u653e\u5668\u555f\u52d5\u5931\u6557: {ex.Message}");
-            SetStatus("\u5167\u5d4c\u64ad\u653e\u5668\u4e0d\u53ef\u7528\uff08\u53ef\u80fd\u7f3a WebView2\uff09\uff0c\u6539\u70ba\u958b\u555f\u539f\u9801");
+            AppendLog($"\u9810\u89bd\u555f\u52d5\u5931\u6557: {ex.Message}");
+            SetStatus("\u9810\u89bd\u4e0d\u53ef\u7528\uff0c\u8acb\u7528\u300c\u539f\u9801\u300d\u958b\u555f");
             _previewOverlay.IsVisible = true;
             _previewWebView.IsVisible = false;
-            OpenOriginalPage(_parsedInfo.WebpageUrl ?? _parsedInfo.Url);
+            if (autoplay && _parsedInfo is not null)
+            {
+                OpenOriginalPage(_parsedInfo.WebpageUrl ?? _parsedInfo.Url);
+            }
         }
+    }
+
+    private async Task<PreviewStreamInfo?> ResolvePreviewStreamAsync(ParsedVideoInfo info, CancellationToken token)
+    {
+        var ytDlpPath = ToolLocator.FindExecutable("yt-dlp");
+        if (ytDlpPath is null)
+        {
+            return null;
+        }
+
+        var pageUrl = info.WebpageUrl ?? info.Url;
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = ytDlpPath,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+        startInfo.Environment["PYTHONIOENCODING"] = "utf-8";
+        startInfo.Environment["PYTHONUTF8"] = "1";
+        // Single progressive file with audio+video so HTML5 <video> can play it.
+        startInfo.ArgumentList.Add("-f");
+        startInfo.ArgumentList.Add(
+            "best[vcodec!=none][acodec!=none][height<=720]/best[vcodec!=none][acodec!=none]/best");
+        startInfo.ArgumentList.Add("-g");
+        startInfo.ArgumentList.Add("--no-playlist");
+        startInfo.ArgumentList.Add("--no-warnings");
+        startInfo.ArgumentList.Add("--encoding");
+        startInfo.ArgumentList.Add("utf-8");
+        AddBilibiliBrowserHeaders(startInfo, pageUrl);
+        _ = AddBilibiliBrowserCookies(startInfo, pageUrl);
+        AddCookiesFileArgument(startInfo, pageUrl);
+        startInfo.ArgumentList.Add(NormalizeMediaUrl(pageUrl));
+
+        using var process = new Process { StartInfo = startInfo };
+        if (!process.Start())
+        {
+            return null;
+        }
+
+        try
+        {
+            var stdoutTask = process.StandardOutput.ReadToEndAsync(token);
+            var stderrTask = process.StandardError.ReadToEndAsync(token);
+            await process.WaitForExitAsync(token).ConfigureAwait(false);
+            var stdout = await stdoutTask.ConfigureAwait(false);
+            var stderr = await stderrTask.ConfigureAwait(false);
+
+            if (process.ExitCode != 0)
+            {
+                if (!string.IsNullOrWhiteSpace(stderr))
+                {
+                    AppendLog($"\u9810\u89bd\u4e32\u6d41\u5931\u6557: {TruncateForLog(stderr.Trim(), 240)}");
+                }
+
+                return null;
+            }
+
+            var streamUrl = stdout
+                .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .FirstOrDefault(line =>
+                    line.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+                    || line.StartsWith("https://", StringComparison.OrdinalIgnoreCase));
+
+            if (string.IsNullOrWhiteSpace(streamUrl) || !Uri.TryCreate(streamUrl, UriKind.Absolute, out _))
+            {
+                return null;
+            }
+
+            var referer = GetPageReferer(pageUrl);
+            return new PreviewStreamInfo(streamUrl, referer);
+        }
+        catch (OperationCanceledException)
+        {
+            try
+            {
+                if (!process.HasExited)
+                {
+                    process.Kill(entireProcessTree: true);
+                }
+            }
+            catch
+            {
+                // ignore
+            }
+
+            throw;
+        }
+    }
+
+    private void LoadHtml5VideoPreview(PreviewStreamInfo stream, bool autoplay)
+    {
+        _previewReferer = stream.Referer;
+        _pendingEmbedHtml = BuildHtml5VideoPlayerHtml(stream.Url, autoplay);
+        _pendingEmbedBaseUri = Uri.TryCreate(stream.Referer, UriKind.Absolute, out var baseUri)
+            ? baseUri
+            : new Uri("https://www.youtube.com/");
+        _pendingDirectEmbedUri = null;
+        FlushPendingEmbeddedPreview();
     }
 
     private void LoadEmbeddedPlayer(Uri embedUri)
@@ -2024,13 +2164,20 @@ public sealed class MainWindow : Window
         var baseUri = GetEmbedBaseUri(embedUri);
         _previewReferer = baseUri.AbsoluteUri;
 
-        // Official embed endpoints can be wrapped in local HTML (for Referer/origin).
-        // Full watch pages often send X-Frame-Options and must be loaded directly.
-        if (IsFramableEmbedUri(embedUri))
+        // Bilibili player page works best as a top-level navigation.
+        // Avoid nested iframes for YouTube (Error 152-4 / 153 in many WebViews).
+        if (IsBilibiliPlayerUri(embedUri))
         {
-            _pendingEmbedHtml = BuildEmbedPlayerHtml(embedUri);
-            _pendingEmbedBaseUri = baseUri;
-            _pendingDirectEmbedUri = null;
+            _pendingEmbedHtml = null;
+            _pendingEmbedBaseUri = null;
+            _pendingDirectEmbedUri = embedUri;
+        }
+        else if (IsYouTubeEmbedUri(embedUri))
+        {
+            // Direct top-level embed as last-resort fallback only.
+            _pendingEmbedHtml = null;
+            _pendingEmbedBaseUri = null;
+            _pendingDirectEmbedUri = embedUri;
         }
         else
         {
@@ -2039,27 +2186,19 @@ public sealed class MainWindow : Window
             _pendingDirectEmbedUri = embedUri;
         }
 
-        // Native adapter may not exist yet (first show). Keep pending and also try now;
-        // AdapterCreated will flush again when the platform WebView is ready.
         FlushPendingEmbeddedPreview();
     }
 
-    private static bool IsFramableEmbedUri(Uri uri)
+    private static bool IsYouTubeEmbedUri(Uri uri)
     {
         var host = uri.Host.ToLowerInvariant();
-        var path = uri.AbsolutePath;
-        if (host.Contains("youtube", StringComparison.Ordinal) || host.Contains("youtube-nocookie", StringComparison.Ordinal))
-        {
-            return path.Contains("/embed/", StringComparison.OrdinalIgnoreCase);
-        }
-
-        if (host.Contains("player.bilibili.com", StringComparison.Ordinal))
-        {
-            return true;
-        }
-
-        return false;
+        return (host.Contains("youtube.com", StringComparison.Ordinal)
+                || host.Contains("youtube-nocookie.com", StringComparison.Ordinal))
+               && uri.AbsolutePath.Contains("/embed/", StringComparison.OrdinalIgnoreCase);
     }
+
+    private static bool IsBilibiliPlayerUri(Uri uri) =>
+        uri.Host.Contains("player.bilibili.com", StringComparison.OrdinalIgnoreCase);
 
     private void FlushPendingEmbeddedPreview()
     {
@@ -2095,9 +2234,6 @@ public sealed class MainWindow : Window
 
         try
         {
-            // NavigateToString + baseUri gives the player a real origin/referrer.
-            // Direct embed navigation in WKWebView often fails with YouTube Error 153
-            // ("Video player configuration error") when Referer is empty.
             _previewWebView.NavigateToString(html, baseUri);
             _pendingEmbedHtml = null;
             _pendingEmbedBaseUri = null;
@@ -2106,21 +2242,12 @@ public sealed class MainWindow : Window
         {
             if (!_previewAdapterReady)
             {
-                // Wait for AdapterCreated; keep pending HTML.
                 return;
             }
 
-            AppendLog($"NavigateToString \u5931\u6557\uff0c\u6539\u7528\u76f4\u63a5\u5167\u5d4c: {ex.Message}");
+            AppendLog($"NavigateToString \u5931\u6557: {ex.Message}");
             _pendingEmbedHtml = null;
             _pendingEmbedBaseUri = null;
-            try
-            {
-                _previewWebView.Source = ExtractIframeSrc(html) ?? baseUri;
-            }
-            catch (Exception fallbackEx)
-            {
-                AppendLog($"\u76f4\u63a5\u5167\u5d4c\u4e5f\u5931\u6557: {fallbackEx.Message}");
-            }
         }
     }
 
@@ -2137,7 +2264,8 @@ public sealed class MainWindow : Window
         if (host.Contains("youtu", StringComparison.Ordinal)
             || host.Contains("google", StringComparison.Ordinal)
             || host.Contains("ytimg", StringComparison.Ordinal)
-            || host.Contains("ggpht", StringComparison.Ordinal))
+            || host.Contains("ggpht", StringComparison.Ordinal)
+            || host.Contains("googlevideo", StringComparison.Ordinal))
         {
             return new Uri("https://www.youtube.com/");
         }
@@ -2145,31 +2273,49 @@ public sealed class MainWindow : Window
         return new Uri($"{embedUri.Scheme}://{embedUri.Host}/");
     }
 
-    private static string BuildEmbedPlayerHtml(Uri embedUri)
+    private static string GetPageReferer(string pageUrl)
     {
-        var src = System.Net.WebUtility.HtmlEncode(embedUri.AbsoluteUri);
-        // Avoid raw-string brace escaping pitfalls; keep markup simple for WebView loadHTMLString.
+        if (IsBilibiliVideoUrl(pageUrl))
+        {
+            return "https://www.bilibili.com/";
+        }
+
+        if (IsYouTubeUrl(pageUrl))
+        {
+            return "https://www.youtube.com/";
+        }
+
+        if (Uri.TryCreate(pageUrl, UriKind.Absolute, out var uri))
+        {
+            return $"{uri.Scheme}://{uri.Host}/";
+        }
+
+        return "https://www.youtube.com/";
+    }
+
+    private static string BuildHtml5VideoPlayerHtml(string streamUrl, bool autoplay)
+    {
+        var src = System.Net.WebUtility.HtmlEncode(streamUrl);
+        var autoplayAttr = autoplay ? " autoplay" : "";
         return
             "<!DOCTYPE html><html><head><meta charset=\"utf-8\" />" +
             "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1, maximum-scale=1\" />" +
-            "<meta name=\"referrer\" content=\"strict-origin-when-cross-origin\" />" +
+            "<meta name=\"referrer\" content=\"origin\" />" +
             "<style>html,body{margin:0;padding:0;width:100%;height:100%;background:#000;overflow:hidden}" +
-            "iframe{border:0;width:100%;height:100%;display:block;background:#000}</style></head><body>" +
-            "<iframe src=\"" + src + "\" title=\"video\" " +
-            "allow=\"accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share; fullscreen\" " +
-            "allowfullscreen referrerpolicy=\"strict-origin-when-cross-origin\" loading=\"eager\"></iframe>" +
+            "video{width:100%;height:100%;display:block;background:#000;object-fit:contain}</style></head><body>" +
+            "<video controls playsinline webkit-playsinline preload=\"metadata\"" + autoplayAttr +
+            " src=\"" + src + "\"></video>" +
             "</body></html>";
     }
 
-    private static Uri? ExtractIframeSrc(string html)
+    private static string TruncateForLog(string text, int maxChars)
     {
-        var match = Regex.Match(html, "src=\"([^\"]+)\"", RegexOptions.IgnoreCase);
-        if (match.Success && Uri.TryCreate(System.Net.WebUtility.HtmlDecode(match.Groups[1].Value), UriKind.Absolute, out var uri))
+        if (string.IsNullOrEmpty(text) || text.Length <= maxChars)
         {
-            return uri;
+            return text;
         }
 
-        return null;
+        return text[..maxChars] + "...";
     }
 
     private void OnPreviewWebResourceRequested(object? sender, WebResourceRequestedEventArgs e)
@@ -2181,7 +2327,7 @@ public sealed class MainWindow : Window
 
         try
         {
-            // YouTube/Bilibili reject embeds with an empty Referer (e.g. YouTube Error 153).
+            // Stream CDNs (googlevideo / bilivideo) often require a matching Referer.
             e.Request.Headers.TrySet("Referer", _previewReferer);
         }
         catch
@@ -2192,6 +2338,16 @@ public sealed class MainWindow : Window
 
     private void StopEmbeddedPreview(bool clearStatus = true)
     {
+        Interlocked.Increment(ref _previewStreamVersion);
+        try
+        {
+            _previewLoadCts?.Cancel();
+        }
+        catch
+        {
+            // ignore
+        }
+
         _pendingEmbedHtml = null;
         _pendingEmbedBaseUri = null;
         _pendingDirectEmbedUri = null;
@@ -2236,6 +2392,14 @@ public sealed class MainWindow : Window
 
         if (e.IsSuccess)
         {
+            var status = _previewStatus.Text ?? "";
+            if (status.Contains("\u4e32\u6d41", StringComparison.Ordinal)
+                || status.Contains("\u9810\u89bd", StringComparison.Ordinal))
+            {
+                // Keep stream-specific status.
+                return;
+            }
+
             _previewStatus.Text = "\u5167\u5d4c\u64ad\u653e\u5668\u5df2\u5c31\u7dd2";
             _previewStatus.Foreground = Green;
             return;
@@ -2264,9 +2428,8 @@ public sealed class MainWindow : Window
                 || extractor.Contains("YouTube", StringComparison.OrdinalIgnoreCase)
                 || IsYouTubeUrl(page))
             {
-                // youtube-nocookie + origin helps desktop WebViews pass YouTube embed checks.
                 return new Uri(
-                    $"https://www.youtube-nocookie.com/embed/{Uri.EscapeDataString(id)}?autoplay={ap}&rel=0&modestbranding=1&playsinline=1&enablejsapi=1&origin={Uri.EscapeDataString("https://www.youtube.com")}");
+                    $"https://www.youtube.com/embed/{Uri.EscapeDataString(id)}?autoplay={ap}&rel=0&modestbranding=1&playsinline=1");
             }
 
             if (extractor.Contains("Bili", StringComparison.OrdinalIgnoreCase) || IsBilibiliVideoUrl(page))
@@ -2312,7 +2475,7 @@ public sealed class MainWindow : Window
             if (!string.IsNullOrWhiteSpace(id))
             {
                 return new Uri(
-                    $"https://www.youtube-nocookie.com/embed/{Uri.EscapeDataString(id)}?autoplay={ap}&rel=0&modestbranding=1&playsinline=1&enablejsapi=1&origin={Uri.EscapeDataString("https://www.youtube.com")}");
+                    $"https://www.youtube.com/embed/{Uri.EscapeDataString(id)}?autoplay={ap}&rel=0&modestbranding=1&playsinline=1");
             }
         }
 
@@ -2335,7 +2498,7 @@ public sealed class MainWindow : Window
             if (!string.IsNullOrWhiteSpace(id))
             {
                 return new Uri(
-                    $"https://www.youtube-nocookie.com/embed/{Uri.EscapeDataString(id)}?autoplay={ap}&rel=0&modestbranding=1&playsinline=1&enablejsapi=1&origin={Uri.EscapeDataString("https://www.youtube.com")}");
+                    $"https://www.youtube.com/embed/{Uri.EscapeDataString(id)}?autoplay={ap}&rel=0&modestbranding=1&playsinline=1");
             }
         }
 
@@ -3935,6 +4098,7 @@ public sealed class MainWindow : Window
     }
 
     private sealed record NavItem(string Id, Border Border);
+    private sealed record PreviewStreamInfo(string Url, string Referer);
     private sealed record ParsedVideoInfo(
         string Title,
         double? DurationSeconds,
