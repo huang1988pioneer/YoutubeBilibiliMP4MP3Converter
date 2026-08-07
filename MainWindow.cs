@@ -2199,28 +2199,75 @@ public sealed class MainWindow : Window
             var batches = await Task.WhenAll(tasks);
             token.ThrowIfCancellationRequested();
 
+            // Preserve each platform's original search ranking (relevance).
+            // Do NOT re-sort by view count — that pushes popular but off-topic videos to the top.
+            // Also require the full keyword to appear in title or description.
+            var ordered = new List<SearchVideoResult>();
+            var youtube = new List<SearchVideoResult>();
+            var bilibili = new List<SearchVideoResult>();
+            var droppedOffTopic = 0;
             foreach (var batch in batches)
             {
-                _searchResults.AddRange(batch);
+                foreach (var item in batch)
+                {
+                    if (!IsUsableSearchResult(item))
+                    {
+                        continue;
+                    }
+
+                    if (!MatchesSearchKeyword(item, query))
+                    {
+                        droppedOffTopic++;
+                        continue;
+                    }
+
+                    if (item.Platform.Equals("Bilibili", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (bilibili.Count < _searchResultLimit)
+                        {
+                            bilibili.Add(item);
+                        }
+                    }
+                    else if (youtube.Count < _searchResultLimit)
+                    {
+                        youtube.Add(item);
+                    }
+                }
             }
 
-            // Keep platform groups (YouTube then Bilibili), each sorted by views.
-            _searchResults.Sort((a, b) =>
+            // When both platforms are searched, interleave by rank so the top
+            // relevant hit from each side appears early (YT1, Bili1, YT2, Bili2...).
+            if (youtube.Count > 0 && bilibili.Count > 0)
             {
-                var platformRank = PlatformRank(a.Platform).CompareTo(PlatformRank(b.Platform));
-                if (platformRank != 0)
+                var max = Math.Max(youtube.Count, bilibili.Count);
+                for (var i = 0; i < max; i++)
                 {
-                    return platformRank;
-                }
+                    if (i < youtube.Count)
+                    {
+                        ordered.Add(youtube[i]);
+                    }
 
-                return (b.ViewCount ?? 0).CompareTo(a.ViewCount ?? 0);
-            });
+                    if (i < bilibili.Count)
+                    {
+                        ordered.Add(bilibili[i]);
+                    }
+                }
+            }
+            else
+            {
+                ordered.AddRange(youtube);
+                ordered.AddRange(bilibili);
+            }
+
+            _searchResults.AddRange(ordered);
 
             RebuildSearchResultsPanel();
 
             if (_searchResults.Count == 0)
             {
-                _searchStatusText.Text = "\u627e\u4e0d\u5230\u76f8\u95dc\u5f71\u7247\uff0c\u8acb\u63db\u500b\u95dc\u9375\u5b57\u6216\u5e73\u53f0";
+                _searchStatusText.Text = droppedOffTopic > 0
+                    ? $"\u6c92\u6709\u6a19\u984c/\u4ecb\u7d39\u542b\u300c{query}\u300d\u7684\u5f71\u7247\uff08\u5df2\u904e\u6ffe {droppedOffTopic} \u7b46\u4e0d\u76f8\u95dc\uff09"
+                    : "\u627e\u4e0d\u5230\u76f8\u95dc\u5f71\u7247\uff0c\u8acb\u63db\u500b\u95dc\u9375\u5b57\u6216\u5e73\u53f0";
                 _searchStatusText.Foreground = Brush.Parse("#F59E0B");
                 SetStatus("\u641c\u5c0b\u7121\u7d50\u679c");
             }
@@ -2228,11 +2275,14 @@ public sealed class MainWindow : Window
             {
                 var ytCount = _searchResults.Count(r => r.Platform == "YouTube");
                 var biliCount = _searchResults.Count(r => r.Platform == "Bilibili");
+                var filterHint = droppedOffTopic > 0
+                    ? $"\uff0c\u5df2\u904e\u6ffe {droppedOffTopic} \u7b46\u4e0d\u542b\u95dc\u9375\u5b57"
+                    : "";
                 _searchStatusText.Text =
-                    $"\u627e\u5230 {_searchResults.Count} \u7b46\u7d50\u679c\uff08YouTube {ytCount} \u00b7 Bilibili {biliCount}\uff09";
+                    $"\u627e\u5230 {_searchResults.Count} \u7b46\u7d50\u679c\uff08YouTube {ytCount} \u00b7 Bilibili {biliCount}{filterHint}\uff09\n\u50c5\u986f\u793a\u6a19\u984c\u6216\u4ecb\u7d39\u542b\u300c{query}\u300d\u7684\u5f71\u7247";
                 _searchStatusText.Foreground = Green;
-                SetStatus($"\u641c\u5c0b\u5b8c\u6210\uff1a{_searchResults.Count} \u7b46");
-                AppendLog($"\u641c\u5c0b\u5b8c\u6210: YT={ytCount}, Bili={biliCount}");
+                SetStatus($"\u641c\u5c0b\u5b8c\u6210\uff1a{_searchResults.Count} \u7b46\uff08\u5df2\u904e\u6ffe\u4e0d\u76f8\u95dc\uff09");
+                AppendLog($"\u641c\u5c0b\u5b8c\u6210: YT={ytCount}, Bili={biliCount}, dropped={droppedOffTopic}");
             }
         }
         catch (OperationCanceledException)
@@ -2789,7 +2839,9 @@ public sealed class MainWindow : Window
         }
 
         limit = Math.Clamp(limit, 1, 50);
-        var searchUrl = $"ytsearch{limit}:{query}";
+        // Over-fetch so keyword filtering still leaves enough hits.
+        var fetchLimit = Math.Clamp(limit * 3, limit, 50);
+        var searchUrl = $"ytsearch{fetchLimit}:{query}";
         var startInfo = new ProcessStartInfo
         {
             FileName = ytDlpPath,
@@ -2839,11 +2891,12 @@ public sealed class MainWindow : Window
         CancellationToken token)
     {
         limit = Math.Clamp(limit, 1, 50);
+        var fetchLimit = Math.Clamp(limit * 3, limit, 50);
 
         // Prefer official search API (more reliable than bilisearch when anti-bot is active).
         try
         {
-            var apiResults = await SearchBilibiliApiAsync(query, limit, token);
+            var apiResults = await SearchBilibiliApiAsync(query, fetchLimit, token);
             if (apiResults.Count > 0)
             {
                 return apiResults;
@@ -2855,7 +2908,7 @@ public sealed class MainWindow : Window
         }
 
         // Fallback: yt-dlp bilisearch (may fail with HTTP 412 in some networks).
-        return await SearchBilibiliViaYtDlpAsync(query, limit, token);
+        return await SearchBilibiliViaYtDlpAsync(query, fetchLimit, token);
     }
 
     private async Task<IReadOnlyList<SearchVideoResult>> SearchBilibiliApiAsync(
@@ -2921,6 +2974,13 @@ public sealed class MainWindow : Window
 
             var titleRaw = entry.TryGetProperty("title", out var t) ? t.GetString() : null;
             var title = StripHtml(titleRaw) ?? bvid;
+            var descRaw = entry.TryGetProperty("description", out var descEl) ? descEl.GetString() : null;
+            if (string.IsNullOrWhiteSpace(descRaw) && entry.TryGetProperty("desc", out var desc2))
+            {
+                descRaw = desc2.GetString();
+            }
+
+            var description = StripHtml(descRaw);
             var author = entry.TryGetProperty("author", out var a) ? a.GetString() : null;
             long? views = null;
             if (entry.TryGetProperty("play", out var play))
@@ -2947,7 +3007,8 @@ public sealed class MainWindow : Window
                 DurationSeconds: duration,
                 ViewCount: views,
                 ThumbnailUrl: NormalizeThumbnailUrl(pic),
-                VideoId: bvid));
+                VideoId: bvid,
+                Description: description));
 
             if (list.Count >= limit)
             {
@@ -3136,6 +3197,19 @@ public sealed class MainWindow : Window
             thumb = singleThumb.GetString();
         }
 
+        string? description = null;
+        if (entry.TryGetProperty("description", out var descEl))
+        {
+            description = descEl.GetString();
+        }
+
+        if (string.IsNullOrWhiteSpace(description) && entry.TryGetProperty("desc", out var desc2))
+        {
+            description = desc2.GetString();
+        }
+
+        description = StripHtml(description);
+
         return new SearchVideoResult(
             Platform: platform,
             Title: title ?? id ?? "\u672a\u77e5\u6a19\u984c",
@@ -3144,7 +3218,8 @@ public sealed class MainWindow : Window
             DurationSeconds: duration,
             ViewCount: views,
             ThumbnailUrl: NormalizeThumbnailUrl(thumb),
-            VideoId: id);
+            VideoId: id,
+            Description: description);
     }
 
     private static HttpClient CreateSearchHttpClient()
@@ -3243,6 +3318,65 @@ public sealed class MainWindow : Window
         platform.Equals("YouTube", StringComparison.OrdinalIgnoreCase) ? 0
         : platform.Equals("Bilibili", StringComparison.OrdinalIgnoreCase) ? 1
         : 2;
+
+    private static bool IsUsableSearchResult(SearchVideoResult item)
+    {
+        if (string.IsNullOrWhiteSpace(item.Url)
+            || !item.Url.StartsWith("http", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(item.Title))
+        {
+            return false;
+        }
+
+        // Drop playlist/meta shells that sometimes leak into flat-search entries.
+        if (item.Url.Contains("ytsearch", StringComparison.OrdinalIgnoreCase)
+            || item.Url.Contains("bilisearch", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Title or description must contain the full keyword phrase
+    /// (e.g. 「煙とブルー」 — not just a loose related word like 「煙」).
+    /// </summary>
+    private static bool MatchesSearchKeyword(SearchVideoResult item, string query)
+    {
+        var keyword = NormalizeSearchText(query);
+        if (string.IsNullOrWhiteSpace(keyword))
+        {
+            return true;
+        }
+
+        var title = NormalizeSearchText(item.Title);
+        var description = NormalizeSearchText(item.Description);
+        var haystack = $"{title}\n{description}";
+
+        return haystack.Contains(keyword, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string NormalizeSearchText(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return "";
+        }
+
+        // Decode HTML entities / strip tags if any remain.
+        var cleaned = StripHtml(text) ?? text;
+        cleaned = cleaned
+            .Replace('\u3000', ' ') // ideographic space
+            .Replace('\u00A0', ' ')
+            .Trim();
+        cleaned = Regex.Replace(cleaned, @"\s+", " ");
+        return cleaned;
+    }
 
     private async Task ParseUrlCoreAsync()
     {
@@ -6312,7 +6446,8 @@ public sealed class MainWindow : Window
         double? DurationSeconds,
         long? ViewCount,
         string? ThumbnailUrl,
-        string? VideoId);
+        string? VideoId,
+        string? Description = null);
 
     private sealed record RecentSearchEntry(
         string Query,
