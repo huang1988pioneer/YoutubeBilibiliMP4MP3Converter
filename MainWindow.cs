@@ -772,31 +772,219 @@ public sealed class MainWindow : Window
         });
 
         var openBtn = CreatePrimaryButton("\u958b\u555f\u8cc7\u6599\u593e", 140);
-        openBtn.Click += (_, _) =>
+        openBtn.Click += (_, _) => OpenOutputFolder(path);
+        panel.Children.Add(openBtn);
+
+        if (!string.IsNullOrWhiteSpace(path) && Directory.Exists(path))
         {
-            if (string.IsNullOrWhiteSpace(path) || !Directory.Exists(path))
+            var recent = Directory.EnumerateFiles(path)
+                .Where(f =>
+                {
+                    var ext = IoPath.GetExtension(f);
+                    return ext.Equals(".mp3", StringComparison.OrdinalIgnoreCase)
+                        || ext.Equals(".mp4", StringComparison.OrdinalIgnoreCase)
+                        || ext.Equals(".m4a", StringComparison.OrdinalIgnoreCase);
+                })
+                .OrderByDescending(File.GetLastWriteTimeUtc)
+                .Take(12)
+                .ToList();
+
+            if (recent.Count > 0)
             {
-                SetStatus("\u8acb\u5148\u9078\u64c7\u6709\u6548\u7684\u8f38\u51fa\u8cc7\u6599\u593e");
-                return;
+                panel.Children.Add(new TextBlock
+                {
+                    Text = "\u6700\u8fd1\u6a94\u6848",
+                    FontSize = 13,
+                    FontWeight = FontWeight.SemiBold,
+                    Foreground = TextPrimary,
+                    Margin = new Thickness(0, 8, 0, 0)
+                });
+
+                foreach (var file in recent)
+                {
+                    var filePath = file;
+                    var row = new Grid
+                    {
+                        ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto"),
+                        ColumnSpacing = 8
+                    };
+                    row.Children.Add(new TextBlock
+                    {
+                        Text = IoPath.GetFileName(filePath),
+                        FontSize = 12,
+                        Foreground = TextPrimary,
+                        TextTrimming = TextTrimming.CharacterEllipsis,
+                        VerticalAlignment = VerticalAlignment.Center
+                    });
+                    var openFileBtn = CreateSoftButton("\u958b\u555f\u6a94\u6848", 96);
+                    openFileBtn.Click += (_, _) => OpenMediaFile(filePath, IoPath.GetExtension(filePath));
+                    Grid.SetColumn(openFileBtn, 1);
+                    row.Children.Add(openFileBtn);
+                    var revealBtn = CreateSoftButton("\u5728\u8cc7\u6599\u593e", 96);
+                    revealBtn.Click += (_, _) => RevealInFolder(filePath);
+                    Grid.SetColumn(revealBtn, 2);
+                    row.Children.Add(revealBtn);
+                    panel.Children.Add(row);
+                }
+            }
+        }
+
+        _mainHost.Children.Add(Card(panel));
+    }
+
+    private void OpenOutputFolder(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path) || !Directory.Exists(path))
+        {
+            SetStatus("\u8acb\u5148\u9078\u64c7\u6709\u6548\u7684\u8f38\u51fa\u8cc7\u6599\u593e");
+            return;
+        }
+
+        try
+        {
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = path,
+                UseShellExecute = true
+            });
+        }
+        catch (Exception ex)
+        {
+            SetStatus("\u7121\u6cd5\u958b\u555f\u8cc7\u6599\u593e");
+            AppendLog(ex.Message);
+        }
+    }
+
+    private void OpenMediaFile(string? path, string? formatHint = null)
+    {
+        path = ResolveOpenableMediaPath(path, formatHint);
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+        {
+            SetStatus("\u627e\u4e0d\u5230\u6a94\u6848\uff0c\u8acb\u5148\u78ba\u8a8d\u5df2\u8f49\u63db\u6210\u529f");
+            AppendLog("\u958b\u555f\u6a94\u6848\u5931\u6557: \u8def\u5f91\u4e0d\u5b58\u5728");
+            return;
+        }
+
+        try
+        {
+            var started = Process.Start(new ProcessStartInfo
+            {
+                FileName = path,
+                UseShellExecute = true,
+                ErrorDialog = true
+            });
+            if (started is null)
+            {
+                // Some shells return null even when launch is handed off successfully.
+                SetStatus($"\u5df2\u8acb\u6c42\u958b\u555f: {IoPath.GetFileName(path)}");
+            }
+            else
+            {
+                SetStatus($"\u5df2\u958b\u555f: {IoPath.GetFileName(path)}");
             }
 
-            try
+            AppendLog($"\u958b\u555f\u6a94\u6848: {path}");
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"\u958b\u555f\u6a94\u6848\u5931\u6557: {ex.Message}");
+            // Fallback: select the file in Explorer so user can open with another player.
+            if (RevealInFolder(path))
+            {
+                SetStatus("\u7121\u6cd5\u76f4\u63a5\u64ad\u653e\uff0c\u5df2\u5728\u8cc7\u6599\u593e\u6a19\u793a\u6a94\u6848");
+            }
+            else
+            {
+                SetStatus("\u7121\u6cd5\u958b\u555f\u6a94\u6848\uff08\u53ef\u80fd\u6c92\u6709\u9810\u8a2d\u64ad\u653e\u5668\uff09");
+            }
+        }
+    }
+
+    private bool RevealInFolder(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+        {
+            return false;
+        }
+
+        try
+        {
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             {
                 Process.Start(new ProcessStartInfo
                 {
-                    FileName = path,
+                    FileName = "explorer.exe",
+                    Arguments = $"/select,\"{path}\"",
                     UseShellExecute = true
                 });
+                return true;
             }
-            catch (Exception ex)
+
+            var dir = IoPath.GetDirectoryName(path);
+            if (string.IsNullOrWhiteSpace(dir))
             {
-                SetStatus("\u7121\u6cd5\u958b\u555f\u8cc7\u6599\u593e");
-                AppendLog(ex.Message);
+                return false;
             }
-        };
-        panel.Children.Add(openBtn);
-        _mainHost.Children.Add(Card(panel));
+
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = dir,
+                UseShellExecute = true
+            });
+            return true;
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"\u958b\u555f\u8cc7\u6599\u593e\u5931\u6557: {ex.Message}");
+            return false;
+        }
     }
+
+    private static string? ResolveOpenableMediaPath(string? path, string? formatHint)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return null;
+        }
+
+        if (File.Exists(path))
+        {
+            // Intermediate audio downloads may still point at .m4a/.webm before rename.
+            if (IsIntermediateAudioPath(path))
+            {
+                var mp3 = IoPath.ChangeExtension(path, ".mp3");
+                if (File.Exists(mp3))
+                {
+                    return mp3;
+                }
+            }
+
+            return path;
+        }
+
+        if (IsIntermediateAudioPath(path) || LooksLikeMp3Hint(formatHint))
+        {
+            var mp3 = IoPath.ChangeExtension(path, ".mp3");
+            if (File.Exists(mp3))
+            {
+                return mp3;
+            }
+        }
+
+        return path;
+    }
+
+    private static bool IsIntermediateAudioPath(string path) =>
+        path.EndsWith(".m4a", StringComparison.OrdinalIgnoreCase)
+        || path.EndsWith(".webm", StringComparison.OrdinalIgnoreCase)
+        || path.EndsWith(".opus", StringComparison.OrdinalIgnoreCase)
+        || path.EndsWith(".ogg", StringComparison.OrdinalIgnoreCase)
+        || path.EndsWith(".wav", StringComparison.OrdinalIgnoreCase);
+
+    private static bool LooksLikeMp3Hint(string? formatHint) =>
+        !string.IsNullOrWhiteSpace(formatHint)
+        && (formatHint.Contains("MP3", StringComparison.OrdinalIgnoreCase)
+            || formatHint.EndsWith(".mp3", StringComparison.OrdinalIgnoreCase));
 
     private void ShowPlaceholder(string title, string message)
     {
@@ -2201,10 +2389,12 @@ public sealed class MainWindow : Window
         };
         startInfo.Environment["PYTHONIOENCODING"] = "utf-8";
         startInfo.Environment["PYTHONUTF8"] = "1";
-        // Single progressive file with audio+video so HTML5 <video> can play it.
+        // Prefer a single progressive A+V file for HTML5 <video>. Avoid pure-audio
+        // "best" as the first choice — audio-only in <video> freezes some WebViews.
+        // If only audio is available, BuildHtml5VideoPlayerHtml switches to <audio>.
         startInfo.ArgumentList.Add("-f");
         startInfo.ArgumentList.Add(
-            "best[vcodec!=none][acodec!=none][height<=720]/best[vcodec!=none][acodec!=none]/best");
+            "best[vcodec!=none][acodec!=none][height<=720]/best[vcodec!=none][acodec!=none]/bestaudio/best");
         startInfo.ArgumentList.Add("-g");
         startInfo.ArgumentList.Add("--no-playlist");
         startInfo.ArgumentList.Add("--no-warnings");
@@ -2420,6 +2610,22 @@ public sealed class MainWindow : Window
     {
         var src = System.Net.WebUtility.HtmlEncode(streamUrl);
         var autoplayAttr = autoplay ? " autoplay" : "";
+        // Audio-only progressive URLs (mp3/m4a/opus, or googlevideo mime=audio) hang or
+        // crash some desktop WebViews when forced into a <video> element.
+        if (LooksLikeAudioOnlyStream(streamUrl))
+        {
+            return
+                "<!DOCTYPE html><html><head><meta charset=\"utf-8\" />" +
+                "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1, maximum-scale=1\" />" +
+                "<meta name=\"referrer\" content=\"origin\" />" +
+                "<style>html,body{margin:0;padding:0;width:100%;height:100%;background:#0F172A;overflow:hidden;" +
+                "display:flex;align-items:center;justify-content:center}" +
+                "audio{width:90%;max-width:520px}</style></head><body>" +
+                "<audio controls preload=\"metadata\"" + autoplayAttr +
+                " src=\"" + src + "\"></audio>" +
+                "</body></html>";
+        }
+
         return
             "<!DOCTYPE html><html><head><meta charset=\"utf-8\" />" +
             "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1, maximum-scale=1\" />" +
@@ -2429,6 +2635,36 @@ public sealed class MainWindow : Window
             "<video controls playsinline webkit-playsinline preload=\"metadata\"" + autoplayAttr +
             " src=\"" + src + "\"></video>" +
             "</body></html>";
+    }
+
+    private static bool LooksLikeAudioOnlyStream(string streamUrl)
+    {
+        if (string.IsNullOrWhiteSpace(streamUrl))
+        {
+            return false;
+        }
+
+        if (streamUrl.Contains("mime=audio", StringComparison.OrdinalIgnoreCase)
+            || streamUrl.Contains("mime%3Daudio", StringComparison.OrdinalIgnoreCase)
+            || streamUrl.Contains("/audio/", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        if (!Uri.TryCreate(streamUrl, UriKind.Absolute, out var uri))
+        {
+            return false;
+        }
+
+        var path = uri.AbsolutePath;
+        return path.EndsWith(".mp3", StringComparison.OrdinalIgnoreCase)
+            || path.EndsWith(".m4a", StringComparison.OrdinalIgnoreCase)
+            || path.EndsWith(".aac", StringComparison.OrdinalIgnoreCase)
+            || path.EndsWith(".opus", StringComparison.OrdinalIgnoreCase)
+            || path.EndsWith(".ogg", StringComparison.OrdinalIgnoreCase)
+            || path.EndsWith(".weba", StringComparison.OrdinalIgnoreCase)
+            || path.EndsWith(".webm", StringComparison.OrdinalIgnoreCase)
+               && streamUrl.Contains("audio", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string TruncateForLog(string text, int maxChars)
@@ -2886,6 +3122,7 @@ public sealed class MainWindow : Window
                     item.SetState(DownloadState.Cancelled);
                 }
             };
+            item.OnOpen = () => OpenMediaFile(item.OutputPath, item.Format);
             _downloadItems.Add(item);
         }
 
@@ -2962,8 +3199,29 @@ public sealed class MainWindow : Window
                 if (code == 0)
                 {
                     successCount++;
+                    var finalPath = ResolveMediaPath(outputPath, _lastMediaOutputPath, item.Format);
+                    if (string.Equals(item.Format, "MP3", StringComparison.OrdinalIgnoreCase)
+                        && !string.IsNullOrWhiteSpace(finalPath)
+                        && File.Exists(finalPath))
+                    {
+                        // Ensure the finished MP3 is openable by common Windows players
+                        // (strip broken cover art / nonstandard tags that block shell open).
+                        finalPath = await SanitizeMp3ForPlaybackAsync(ffmpegPath, finalPath)
+                            .ConfigureAwait(true) ?? finalPath;
+                    }
+
+                    item.OutputPath = finalPath;
                     item.SetState(DownloadState.Completed);
                     item.SetProgress(100, "\u5b8c\u6210");
+                    if (!string.IsNullOrWhiteSpace(finalPath))
+                    {
+                        AppendLog($"\u8f38\u51fa\u6a94\u6848: {finalPath}");
+                    }
+                    else
+                    {
+                        AppendLog("\u8b66\u544a: \u8f49\u63db\u6210\u529f\u4f46\u627e\u4e0d\u5230\u8f38\u51fa\u6a94\uff0c\u8acb\u81ea\u8a02\u8f38\u51fa\u8cc7\u6599\u593e\u6aa2\u67e5");
+                    }
+
                     await WarnIfDownloadedDurationIsShortAsync(
                         ffprobePath,
                         outputPath,
@@ -3038,6 +3296,8 @@ public sealed class MainWindow : Window
         startInfo.ArgumentList.Add("8");
         startInfo.ArgumentList.Add("--fragment-retries");
         startInfo.ArgumentList.Add("8");
+        // Default: ignore attached playlists (watch?v=...&list=...). Only the single video.
+        startInfo.ArgumentList.Add("--no-playlist");
 
         // Subtitles are handled in a separate pass so HTTP 429 on captions cannot abort media.
         if (includeSubtitles)
@@ -3056,7 +3316,14 @@ public sealed class MainWindow : Window
 
         if (outputFormat == "MP3")
         {
+            // YouTube/Bilibili often provide WebP covers. Embedding WebP into MP3
+            // can freeze or crash Windows Media Player / Groove / some shell handlers.
+            // Convert to JPEG first and force ID3v2.3 for broader player compatibility.
+            startInfo.ArgumentList.Add("--convert-thumbnails");
+            startInfo.ArgumentList.Add("jpg");
             startInfo.ArgumentList.Add("--embed-thumbnail");
+            startInfo.ArgumentList.Add("--postprocessor-args");
+            startInfo.ArgumentList.Add("ffmpeg:-id3v2_version 3");
         }
 
         startInfo.ArgumentList.Add("--add-metadata");
@@ -3064,7 +3331,7 @@ public sealed class MainWindow : Window
         startInfo.ArgumentList.Add(outputPath);
         startInfo.ArgumentList.Add("--output");
         startInfo.ArgumentList.Add("%(title)s.%(ext)s");
-        startInfo.ArgumentList.Add(url);
+        startInfo.ArgumentList.Add(NormalizeMediaUrl(url));
 
         return await RunProcessAsync(startInfo, token, item);
     }
@@ -3110,6 +3377,7 @@ public sealed class MainWindow : Window
             startInfo.ArgumentList.Add("--ffmpeg-location");
             startInfo.ArgumentList.Add(IoPath.GetDirectoryName(ffmpegPath) ?? ffmpegPath);
             startInfo.ArgumentList.Add("--newline");
+            startInfo.ArgumentList.Add("--no-playlist");
             startInfo.ArgumentList.Add("--ignore-errors");
             startInfo.ArgumentList.Add("--retries");
             startInfo.ArgumentList.Add("3");
@@ -3128,7 +3396,7 @@ public sealed class MainWindow : Window
             AddBilibiliBrowserHeaders(startInfo, url);
             AddBilibiliBrowserCookies(startInfo, url);
             AddCookiesFileArgument(startInfo, url);
-            startInfo.ArgumentList.Add(url);
+            startInfo.ArgumentList.Add(NormalizeMediaUrl(url));
 
             var code = await RunProcessAsync(startInfo, token, item);
             if (code == 0 && HasAnySubtitleNearLatestMedia(outputPath, outputFormat, _lastMediaOutputPath))
@@ -3527,9 +3795,29 @@ public sealed class MainWindow : Window
 
     private static string? ResolveMediaPath(string outputDir, string? mediaPathHint, string format)
     {
-        if (!string.IsNullOrWhiteSpace(mediaPathHint) && File.Exists(mediaPathHint))
+        var wantMp3 = string.Equals(format, "MP3", StringComparison.OrdinalIgnoreCase);
+
+        if (!string.IsNullOrWhiteSpace(mediaPathHint))
         {
-            return mediaPathHint;
+            if (wantMp3)
+            {
+                // yt-dlp often logs the pre-convert audio path first (.m4a/.webm). Prefer sibling .mp3.
+                if (mediaPathHint.EndsWith(".mp3", StringComparison.OrdinalIgnoreCase) && File.Exists(mediaPathHint))
+                {
+                    return mediaPathHint;
+                }
+
+                var siblingMp3 = IoPath.ChangeExtension(mediaPathHint, ".mp3");
+                if (File.Exists(siblingMp3))
+                {
+                    return siblingMp3;
+                }
+            }
+
+            if (File.Exists(mediaPathHint))
+            {
+                return mediaPathHint;
+            }
         }
 
         if (!Directory.Exists(outputDir))
@@ -3537,10 +3825,112 @@ public sealed class MainWindow : Window
             return null;
         }
 
-        var ext = string.Equals(format, "MP3", StringComparison.OrdinalIgnoreCase) ? ".mp3" : ".mp4";
+        var ext = wantMp3 ? ".mp3" : ".mp4";
         return Directory.GetFiles(outputDir, "*" + ext)
             .OrderByDescending(File.GetLastWriteTimeUtc)
             .FirstOrDefault();
+    }
+
+    /// <summary>
+    /// Rebuild a clean, shell-openable MP3. Some players refuse files with broken
+    /// cover-art tags (WebP APIC) or nonstandard streams left by post-processors.
+    /// </summary>
+    private async Task<string?> SanitizeMp3ForPlaybackAsync(string ffmpegPath, string mp3Path)
+    {
+        try
+        {
+            if (!File.Exists(mp3Path) || !File.Exists(ffmpegPath))
+            {
+                return mp3Path;
+            }
+
+            var dir = IoPath.GetDirectoryName(mp3Path) ?? IoPath.GetTempPath();
+            var tempPath = IoPath.Combine(dir, IoPath.GetFileNameWithoutExtension(mp3Path) + ".openable.tmp.mp3");
+            if (File.Exists(tempPath))
+            {
+                File.Delete(tempPath);
+            }
+
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = ffmpegPath,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = false,
+                RedirectStandardError = false
+            };
+            // Audio-only remux/re-encode with ID3v2.3 — widely accepted by Windows players.
+            startInfo.ArgumentList.Add("-hide_banner");
+            startInfo.ArgumentList.Add("-loglevel");
+            startInfo.ArgumentList.Add("error");
+            startInfo.ArgumentList.Add("-y");
+            startInfo.ArgumentList.Add("-i");
+            startInfo.ArgumentList.Add(mp3Path);
+            startInfo.ArgumentList.Add("-map");
+            startInfo.ArgumentList.Add("0:a:0");
+            startInfo.ArgumentList.Add("-c:a");
+            startInfo.ArgumentList.Add("libmp3lame");
+            startInfo.ArgumentList.Add("-q:a");
+            startInfo.ArgumentList.Add("2");
+            startInfo.ArgumentList.Add("-vn");
+            startInfo.ArgumentList.Add("-id3v2_version");
+            startInfo.ArgumentList.Add("3");
+            startInfo.ArgumentList.Add("-write_id3v1");
+            startInfo.ArgumentList.Add("1");
+            startInfo.ArgumentList.Add(tempPath);
+
+            using var process = Process.Start(startInfo);
+            if (process is null)
+            {
+                return mp3Path;
+            }
+
+            await process.WaitForExitAsync().ConfigureAwait(false);
+            if (process.ExitCode != 0 || !File.Exists(tempPath) || new FileInfo(tempPath).Length < 1024)
+            {
+                if (File.Exists(tempPath))
+                {
+                    File.Delete(tempPath);
+                }
+
+                AppendLog("MP3 \u6e05\u7406\u5931\u6557\uff0c\u4ecd\u4f7f\u7528\u539f\u6a94");
+                return mp3Path;
+            }
+
+            var backupPath = mp3Path + ".bak";
+            try
+            {
+                if (File.Exists(backupPath))
+                {
+                    File.Delete(backupPath);
+                }
+
+                File.Move(mp3Path, backupPath);
+                File.Move(tempPath, mp3Path);
+                File.Delete(backupPath);
+                AppendLog("MP3: \u5df2\u91cd\u5efa\u53ef\u64ad\u653e\u6a94\uff08\u76f8\u5bb9 Windows \u64ad\u653e\u5668\uff09");
+                return mp3Path;
+            }
+            catch
+            {
+                if (!File.Exists(mp3Path) && File.Exists(backupPath))
+                {
+                    File.Move(backupPath, mp3Path);
+                }
+
+                if (File.Exists(tempPath))
+                {
+                    File.Delete(tempPath);
+                }
+
+                return File.Exists(mp3Path) ? mp3Path : null;
+            }
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"MP3 \u6e05\u7406\u7570\u5e38: {ex.Message}");
+            return File.Exists(mp3Path) ? mp3Path : null;
+        }
     }
 
     private static string? FindBestSubtitleForStem(string dir, string stem)
@@ -3793,17 +4183,38 @@ public sealed class MainWindow : Window
             return url;
         }
 
-        if (!IsBilibiliVideoUri(uri))
+        // Strip tracking params and playlist attachments so a shared watch URL
+        // (watch?v=ID&list=PL...) only targets the single video by default.
+        if (IsBilibiliVideoUri(uri) || IsYouTubeWatchUri(uri))
         {
-            return url;
+            var cleaned = RemoveTrackingQueryParameters(uri.Query);
+            var builder = new UriBuilder(uri)
+            {
+                Query = cleaned
+            };
+            return builder.Uri.ToString();
         }
 
-        var builder = new UriBuilder(uri)
-        {
-            Query = RemoveTrackingQueryParameters(uri.Query)
-        };
+        return url;
+    }
 
-        return builder.Uri.ToString();
+    private static bool IsYouTubeWatchUri(Uri uri)
+    {
+        var host = uri.Host;
+        if (!(host.Contains("youtube.com", StringComparison.OrdinalIgnoreCase)
+              || host.Equals("youtu.be", StringComparison.OrdinalIgnoreCase)
+              || host.Contains("youtube-nocookie.com", StringComparison.OrdinalIgnoreCase)))
+        {
+            return false;
+        }
+
+        // Keep pure playlist URLs (/playlist?list=...) intact for explicit playlist use.
+        if (uri.AbsolutePath.StartsWith("/playlist", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        return true;
     }
 
     private static bool IsBilibiliVideoUrl(string url) =>
@@ -3820,10 +4231,14 @@ public sealed class MainWindow : Window
             return "";
         }
 
-        var trackingKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        // Bilibili tracking + YouTube playlist/session params that expand a single
+        // watch link into a full playlist download.
+        var dropKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
             "spm_id_from", "from_spmid", "vd_source", "share_source",
-            "share_medium", "share_plat", "share_session_id", "unique_k"
+            "share_medium", "share_plat", "share_session_id", "unique_k",
+            "list", "index", "start_radio", "pp", "playnext", "si", "feature",
+            "ab_channel", "t"
         };
 
         var kept = query.TrimStart('?')
@@ -3831,7 +4246,7 @@ public sealed class MainWindow : Window
             .Where(parameter =>
             {
                 var key = parameter.Split('=', 2)[0];
-                return !trackingKeys.Contains(Uri.UnescapeDataString(key));
+                return !dropKeys.Contains(Uri.UnescapeDataString(key));
             });
 
         return string.Join("&", kept);
@@ -4357,8 +4772,10 @@ public sealed class MainWindow : Window
         private readonly TextBlock _metaText;
         private readonly TextBlock _progressText;
         private readonly TextBlock _stateBadge;
+        private readonly Button _openBtn;
         private readonly ProgressBar _bar;
         private readonly Border _root;
+        private string? _outputPath;
 
         public string Title { get; }
         public string Url { get; }
@@ -4366,9 +4783,31 @@ public sealed class MainWindow : Window
         public string Quality { get; }
         public DownloadState State { get; private set; } = DownloadState.Queued;
         public double Progress { get; private set; }
+        public string? OutputPath
+        {
+            get => _outputPath;
+            set
+            {
+                _outputPath = value;
+                Dispatcher.UIThread.Post(() =>
+                {
+                    try
+                    {
+                        _openBtn.IsVisible = State == DownloadState.Completed
+                            && !string.IsNullOrWhiteSpace(_outputPath)
+                            && File.Exists(_outputPath);
+                    }
+                    catch
+                    {
+                        // ignore
+                    }
+                }, DispatcherPriority.Background);
+            }
+        }
         public Border Root => _root;
         public Action? OnRemove { get; set; }
         public Action? OnCancel { get; set; }
+        public Action? OnOpen { get; set; }
 
         public DownloadItemView(string title, string url, string format, string quality)
         {
@@ -4413,6 +4852,20 @@ public sealed class MainWindow : Window
                 Height = 6,
                 MinWidth = 120
             };
+
+            _openBtn = new Button
+            {
+                Content = "\u958b\u555f",
+                MinWidth = 44,
+                Height = 28,
+                FontSize = 11,
+                Foreground = Blue,
+                Background = Brushes.Transparent,
+                Cursor = new Cursor(StandardCursorType.Hand),
+                Padding = new Thickness(6, 0),
+                IsVisible = false
+            };
+            _openBtn.Click += (_, _) => OnOpen?.Invoke();
 
             var removeBtn = new Button
             {
@@ -4471,6 +4924,7 @@ public sealed class MainWindow : Window
                 VerticalAlignment = VerticalAlignment.Center
             };
             actions.Children.Add(_stateBadge);
+            actions.Children.Add(_openBtn);
             actions.Children.Add(cancelBtn);
             actions.Children.Add(removeBtn);
             Grid.SetColumn(actions, 2);
@@ -4517,6 +4971,9 @@ public sealed class MainWindow : Window
                         DownloadState.Paused => ("\u66ab\u505c", Brush.Parse("#F59E0B")),
                         _ => ("\u6392\u968a", Blue)
                     };
+                    _openBtn.IsVisible = state == DownloadState.Completed
+                        && !string.IsNullOrWhiteSpace(_outputPath)
+                        && File.Exists(_outputPath);
                 }
                 catch
                 {
