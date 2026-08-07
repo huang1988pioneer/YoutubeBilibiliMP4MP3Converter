@@ -57,16 +57,23 @@ public sealed class MainWindow : Window
 
     private readonly List<NavItem> _navItems = [];
     private readonly List<DownloadItemView> _downloadItems = [];
+    private readonly List<SearchVideoResult> _searchResults = [];
     private readonly StackPanel _downloadListPanel;
+    private readonly StackPanel _searchResultsPanel;
     private readonly StackPanel _mainHost;
     private readonly TextBox _urlBox;
     private readonly TextBox _outputBox;
+    private readonly TextBox _searchBox;
     private readonly ComboBox _qualityCombo;
+    private readonly ComboBox _searchPlatformCombo;
+    private readonly ComboBox _searchCountCombo;
     private readonly Button _parseButton;
     private readonly Button _convertButton;
     private readonly Button _pasteButton;
     private readonly Button _browseButton;
     private readonly Button _clearQueueButton;
+    private readonly Button _searchButton;
+    private readonly TextBlock _searchStatusText;
     private readonly Border _mp4Card;
     private readonly Border _mp3Card;
     private readonly Border _previewCard;
@@ -102,10 +109,13 @@ public sealed class MainWindow : Window
     private bool _includeSubtitles = false;
     private bool _downloadPlaylist = false;
     private string _activeNav = "home";
+    private string _searchPlatform = "both";
+    private int _searchResultLimit = 12;
     private int _todayDownloads;
     private string _lastSpeed = "-";
     private ParsedVideoInfo? _parsedInfo;
     private CancellationTokenSource? _conversionTokenSource;
+    private CancellationTokenSource? _searchTokenSource;
     private DownloadItemView? _activeDownload;
     private string? _lastMediaOutputPath;
     private Bitmap? _previewBitmap;
@@ -154,6 +164,69 @@ public sealed class MainWindow : Window
         _outputBox = CreateInputBox("\u9078\u64c7\u8f38\u51fa\u8cc7\u6599\u593e");
         _outputBox.Text = settings.LastOutputFolder;
         _outputBox.LostFocus += (_, _) => SaveSettingsIfPossible();
+
+        _searchBox = CreateInputBox("\u8f38\u5165\u95dc\u9375\u5b57\u641c\u5c0b YouTube / Bilibili \u5f71\u7247...");
+        _searchBox.KeyDown += async (_, e) =>
+        {
+            if (e.Key == Key.Enter)
+            {
+                e.Handled = true;
+                await SearchVideosCoreAsync();
+            }
+        };
+
+        _searchPlatformCombo = new ComboBox
+        {
+            ItemsSource = new[]
+            {
+                "YouTube + Bilibili",
+                "YouTube",
+                "Bilibili"
+            },
+            SelectedIndex = 0,
+            MinWidth = 160,
+            MinHeight = 36,
+            FontSize = 13
+        };
+        _searchPlatformCombo.SelectionChanged += (_, _) =>
+        {
+            _searchPlatform = _searchPlatformCombo.SelectedIndex switch
+            {
+                1 => "youtube",
+                2 => "bilibili",
+                _ => "both"
+            };
+        };
+
+        _searchCountCombo = new ComboBox
+        {
+            ItemsSource = new[] { "6", "12", "20", "30" },
+            SelectedItem = "12",
+            MinWidth = 80,
+            MinHeight = 36,
+            FontSize = 13
+        };
+        _searchCountCombo.SelectionChanged += (_, _) =>
+        {
+            if (_searchCountCombo.SelectedItem is string raw
+                && int.TryParse(raw, out var count)
+                && count > 0)
+            {
+                _searchResultLimit = Math.Clamp(count, 1, 50);
+            }
+        };
+
+        _searchButton = CreatePrimaryButton("\u641c\u5c0b\u5f71\u7247", 120);
+        _searchButton.Click += async (_, _) => await SearchVideosCoreAsync();
+
+        _searchStatusText = new TextBlock
+        {
+            Text = "\u8f38\u5165\u95dc\u9375\u5b57\uff0c\u641c\u5c0b YouTube \u6216 Bilibili \u5f71\u7247",
+            FontSize = 13,
+            Foreground = TextSecondary,
+            TextWrapping = TextWrapping.Wrap
+        };
+        _searchResultsPanel = new StackPanel { Spacing = 10 };
 
         _qualityCombo = new ComboBox
         {
@@ -519,6 +592,7 @@ public sealed class MainWindow : Window
         stack.Children.Add(brand);
 
         stack.Children.Add(CreateNav("home", "\u9996\u9801"));
+        stack.Children.Add(CreateNav("search", "\u641c\u5c0b\u5f71\u7247"));
         stack.Children.Add(CreateNav("parse", "\u7db2\u5740\u89e3\u6790"));
         stack.Children.Add(CreateNav("downloading", "\u4e0b\u8f09\u4e2d"));
         stack.Children.Add(CreateNav("done", "\u5df2\u5b8c\u6210"));
@@ -685,6 +759,9 @@ public sealed class MainWindow : Window
             case "parse":
                 ShowHomePage();
                 break;
+            case "search":
+                ShowSearchPage();
+                break;
             case "downloading":
                 ShowQueuePage(onlyActive: true);
                 break;
@@ -850,6 +927,109 @@ public sealed class MainWindow : Window
         }
 
         _mainHost.Children.Add(Card(panel));
+    }
+
+    private void ShowSearchPage()
+    {
+        StopEmbeddedPreview(clearStatus: false);
+        using var reparent = _previewWebView.BeginReparenting();
+        DetachSharedControls();
+        _mainHost.Children.Clear();
+
+        _mainHost.Children.Add(SectionTitle(
+            "\u641c\u5c0b\u5f71\u7247",
+            "\u641c\u5c0b YouTube \u6216 Bilibili\uff0c\u9ede\u9078\u7d50\u679c\u5373\u53ef\u89e3\u6790\u6216\u8f49\u63db"));
+
+        var form = new StackPanel { Spacing = 12 };
+
+        form.Children.Add(new TextBlock
+        {
+            Text = "\u95dc\u9375\u5b57",
+            FontSize = 13,
+            FontWeight = FontWeight.SemiBold,
+            Foreground = TextPrimary
+        });
+
+        var searchRow = new Grid
+        {
+            ColumnDefinitions = new ColumnDefinitions("*,Auto"),
+            ColumnSpacing = 10
+        };
+        searchRow.Children.Add(_searchBox);
+        Grid.SetColumn(_searchButton, 1);
+        searchRow.Children.Add(_searchButton);
+        form.Children.Add(searchRow);
+
+        var filterRow = new Grid
+        {
+            ColumnDefinitions = new ColumnDefinitions("Auto,Auto,Auto,Auto,*"),
+            ColumnSpacing = 10
+        };
+        filterRow.Children.Add(new TextBlock
+        {
+            Text = "\u5e73\u53f0",
+            FontSize = 13,
+            Foreground = TextSecondary,
+            VerticalAlignment = VerticalAlignment.Center
+        });
+        Grid.SetColumn(_searchPlatformCombo, 1);
+        filterRow.Children.Add(_searchPlatformCombo);
+        var countLabel = new TextBlock
+        {
+            Text = "\u6bcf\u5e73\u53f0\u7d50\u679c\u6578",
+            FontSize = 13,
+            Foreground = TextSecondary,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(8, 0, 0, 0)
+        };
+        Grid.SetColumn(countLabel, 2);
+        filterRow.Children.Add(countLabel);
+        Grid.SetColumn(_searchCountCombo, 3);
+        filterRow.Children.Add(_searchCountCombo);
+        form.Children.Add(filterRow);
+
+        form.Children.Add(_searchStatusText);
+
+        var chips = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 8
+        };
+        chips.Children.Add(PlatformChip("YouTube", RedYouTube, Brush.Parse("#FFECEC")));
+        chips.Children.Add(PlatformChip("bilibili", PinkBili, PinkBiliSoft));
+        chips.Children.Add(new TextBlock
+        {
+            Text = "YouTube \u7d93 yt-dlp\uff1bBilibili \u7d93\u5b98\u65b9\u641c\u5c0b API",
+            FontSize = 11,
+            Foreground = TextMuted,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(6, 0, 0, 0)
+        });
+        form.Children.Add(chips);
+
+        _mainHost.Children.Add(Card(form));
+
+        var resultsBody = new StackPanel { Spacing = 10 };
+        resultsBody.Children.Add(new TextBlock
+        {
+            Text = "\u641c\u5c0b\u7d50\u679c",
+            FontSize = 14,
+            FontWeight = FontWeight.SemiBold,
+            Foreground = TextPrimary
+        });
+        resultsBody.Children.Add(_searchResultsPanel);
+        if (_searchResultsPanel.Children.Count == 0)
+        {
+            _searchResultsPanel.Children.Add(new TextBlock
+            {
+                Text = "\u5c1a\u7121\u7d50\u679c\u3002\u8f38\u5165\u95dc\u9375\u5b57\u5f8c\u6309\u300c\u641c\u5c0b\u5f71\u7247\u300d\u3002",
+                FontSize = 13,
+                Foreground = TextMuted,
+                Margin = new Thickness(0, 4, 0, 0)
+            });
+        }
+
+        _mainHost.Children.Add(Card(resultsBody));
     }
 
     private void OpenOutputFolder(string? path)
@@ -1069,6 +1249,12 @@ public sealed class MainWindow : Window
         DetachFromParent(_clearQueueButton);
         DetachFromParent(_downloadListPanel);
         DetachFromParent(_logText);
+        DetachFromParent(_searchBox);
+        DetachFromParent(_searchButton);
+        DetachFromParent(_searchPlatformCombo);
+        DetachFromParent(_searchCountCombo);
+        DetachFromParent(_searchStatusText);
+        DetachFromParent(_searchResultsPanel);
 
         foreach (var item in _downloadItems)
         {
@@ -1400,10 +1586,11 @@ public sealed class MainWindow : Window
             RowSpacing = 10,
             ColumnSpacing = 10
         };
-        grid.Children.Add(UtilButton("\u6279\u91cf", "\u6279\u91cf\u4e0b\u8f09", () =>
+        grid.Children.Add(UtilButton("\u641c\u5c0b", "\u641c\u5c0b\u5f71\u7247", () =>
         {
-            SetStatus("\u53ef\u5728\u7db2\u5740\u6b04\u8cbc\u591a\u884c\u7db2\u5740\uff08\u6bcf\u884c\u4e00\u500b\uff09\u5f8c\u958b\u59cb\u8f49\u63db");
-            _urlBox.Focus();
+            Navigate("search");
+            SetStatus("\u53ef\u641c\u5c0b YouTube / Bilibili \u5f71\u7247");
+            _searchBox.Focus();
         }));
         var sub = UtilButton("CC", "\u5b57\u5e55\u642d\u914d", () =>
         {
@@ -1423,14 +1610,14 @@ public sealed class MainWindow : Window
         });
         Grid.SetRow(audio, 1);
         grid.Children.Add(audio);
-        var fmt = UtilButton("FMT", "\u683c\u5f0f\u8f49\u63db", () =>
+        var batch = UtilButton("\u6279\u91cf", "\u6279\u91cf\u4e0b\u8f09", () =>
         {
-            SetOutputFormat(_outputFormat == "MP4" ? "MP3" : "MP4");
-            SetStatus($"\u5df2\u5207\u63db\u70ba {_outputFormat}");
+            SetStatus("\u53ef\u5728\u7db2\u5740\u6b04\u8cbc\u591a\u884c\u7db2\u5740\uff08\u6bcf\u884c\u4e00\u500b\uff09\u5f8c\u958b\u59cb\u8f49\u63db");
+            _urlBox.Focus();
         });
-        Grid.SetRow(fmt, 1);
-        Grid.SetColumn(fmt, 1);
-        grid.Children.Add(fmt);
+        Grid.SetRow(batch, 1);
+        Grid.SetColumn(batch, 1);
+        grid.Children.Add(batch);
         utils.Children.Add(grid);
 
         var utilsCard = Card(utils);
@@ -1846,6 +2033,828 @@ public sealed class MainWindow : Window
     }
 
     private async void ParseUrlAsync(object? sender, RoutedEventArgs e) => await ParseUrlCoreAsync();
+
+    private async Task SearchVideosCoreAsync()
+    {
+        var query = (_searchBox.Text ?? "").Trim();
+        if (string.IsNullOrWhiteSpace(query))
+        {
+            _searchStatusText.Text = "\u8acb\u8f38\u5165\u641c\u5c0b\u95dc\u9375\u5b57";
+            _searchStatusText.Foreground = Brush.Parse("#EF4444");
+            SetStatus("\u8acb\u8f38\u5165\u641c\u5c0b\u95dc\u9375\u5b57");
+            return;
+        }
+
+        _searchTokenSource?.Cancel();
+        _searchTokenSource?.Dispose();
+        _searchTokenSource = new CancellationTokenSource();
+        var token = _searchTokenSource.Token;
+
+        _searchButton.IsEnabled = false;
+        _searchStatusText.Text = "\u641c\u5c0b\u4e2d...";
+        _searchStatusText.Foreground = TextSecondary;
+        SetStatus($"\u6b63\u5728\u641c\u5c0b\uff1a{query}");
+        AppendLog($"\u641c\u5c0b [{_searchPlatform}]: {query}");
+
+        _searchResults.Clear();
+        _searchResultsPanel.Children.Clear();
+        _searchResultsPanel.Children.Add(new TextBlock
+        {
+            Text = "\u6b63\u5728\u641c\u5c0b\uff0c\u8acb\u7a0d\u5019...",
+            FontSize = 13,
+            Foreground = TextMuted
+        });
+
+        try
+        {
+            var tasks = new List<Task<IReadOnlyList<SearchVideoResult>>>();
+            if (_searchPlatform is "youtube" or "both")
+            {
+                tasks.Add(SearchYouTubeAsync(query, _searchResultLimit, token));
+            }
+
+            if (_searchPlatform is "bilibili" or "both")
+            {
+                tasks.Add(SearchBilibiliAsync(query, _searchResultLimit, token));
+            }
+
+            var batches = await Task.WhenAll(tasks);
+            token.ThrowIfCancellationRequested();
+
+            foreach (var batch in batches)
+            {
+                _searchResults.AddRange(batch);
+            }
+
+            // Keep platform groups (YouTube then Bilibili), each sorted by views.
+            _searchResults.Sort((a, b) =>
+            {
+                var platformRank = PlatformRank(a.Platform).CompareTo(PlatformRank(b.Platform));
+                if (platformRank != 0)
+                {
+                    return platformRank;
+                }
+
+                return (b.ViewCount ?? 0).CompareTo(a.ViewCount ?? 0);
+            });
+
+            RebuildSearchResultsPanel();
+
+            if (_searchResults.Count == 0)
+            {
+                _searchStatusText.Text = "\u627e\u4e0d\u5230\u76f8\u95dc\u5f71\u7247\uff0c\u8acb\u63db\u500b\u95dc\u9375\u5b57\u6216\u5e73\u53f0";
+                _searchStatusText.Foreground = Brush.Parse("#F59E0B");
+                SetStatus("\u641c\u5c0b\u7121\u7d50\u679c");
+            }
+            else
+            {
+                var ytCount = _searchResults.Count(r => r.Platform == "YouTube");
+                var biliCount = _searchResults.Count(r => r.Platform == "Bilibili");
+                _searchStatusText.Text =
+                    $"\u627e\u5230 {_searchResults.Count} \u7b46\u7d50\u679c\uff08YouTube {ytCount} \u00b7 Bilibili {biliCount}\uff09";
+                _searchStatusText.Foreground = Green;
+                SetStatus($"\u641c\u5c0b\u5b8c\u6210\uff1a{_searchResults.Count} \u7b46");
+                AppendLog($"\u641c\u5c0b\u5b8c\u6210: YT={ytCount}, Bili={biliCount}");
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            _searchStatusText.Text = "\u641c\u5c0b\u5df2\u53d6\u6d88";
+            _searchStatusText.Foreground = TextMuted;
+            SetStatus("\u641c\u5c0b\u5df2\u53d6\u6d88");
+        }
+        catch (Exception ex)
+        {
+            _searchStatusText.Text = $"\u641c\u5c0b\u5931\u6557\uff1a{ex.Message}";
+            _searchStatusText.Foreground = Brush.Parse("#EF4444");
+            SetStatus("\u641c\u5c0b\u5931\u6557");
+            AppendLog($"\u641c\u5c0b\u932f\u8aa4: {ex.Message}");
+            _searchResultsPanel.Children.Clear();
+            _searchResultsPanel.Children.Add(new TextBlock
+            {
+                Text = "\u641c\u5c0b\u6642\u767c\u751f\u932f\u8aa4\uff0c\u8acb\u6aa2\u67e5\u7db2\u8def\u6216 yt-dlp\u3002",
+                FontSize = 13,
+                Foreground = Brush.Parse("#EF4444")
+            });
+        }
+        finally
+        {
+            _searchButton.IsEnabled = true;
+        }
+    }
+
+    private void RebuildSearchResultsPanel()
+    {
+        _searchResultsPanel.Children.Clear();
+        if (_searchResults.Count == 0)
+        {
+            _searchResultsPanel.Children.Add(new TextBlock
+            {
+                Text = "\u6c92\u6709\u7b26\u5408\u7684\u5f71\u7247\u3002",
+                FontSize = 13,
+                Foreground = TextMuted
+            });
+            return;
+        }
+
+        foreach (var item in _searchResults)
+        {
+            _searchResultsPanel.Children.Add(BuildSearchResultCard(item));
+        }
+    }
+
+    private Control BuildSearchResultCard(SearchVideoResult item)
+    {
+        var isYouTube = item.Platform.Equals("YouTube", StringComparison.OrdinalIgnoreCase);
+        var accent = isYouTube ? RedYouTube : PinkBili;
+        var soft = isYouTube ? Brush.Parse("#FFECEC") : PinkBiliSoft;
+
+        var root = new Border
+        {
+            Background = BgCard,
+            BorderBrush = BorderSoft,
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(12),
+            Padding = new Thickness(12),
+            Cursor = new Cursor(StandardCursorType.Hand)
+        };
+
+        var grid = new Grid
+        {
+            ColumnDefinitions = new ColumnDefinitions("120,*"),
+            ColumnSpacing = 12
+        };
+
+        var thumbHost = new Border
+        {
+            Width = 120,
+            Height = 68,
+            CornerRadius = new CornerRadius(8),
+            ClipToBounds = true,
+            Background = Brush.Parse("#0F172A"),
+            BorderBrush = BorderSoft,
+            BorderThickness = new Thickness(1)
+        };
+        var thumbPlaceholder = new TextBlock
+        {
+            Text = isYouTube ? "YT" : "Bili",
+            FontSize = 14,
+            FontWeight = FontWeight.Bold,
+            Foreground = Brushes.White,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        var thumbImage = new Image
+        {
+            Stretch = Stretch.UniformToFill,
+            IsVisible = false
+        };
+        var thumbLayer = new Grid();
+        thumbLayer.Children.Add(thumbPlaceholder);
+        thumbLayer.Children.Add(thumbImage);
+        thumbHost.Child = thumbLayer;
+        grid.Children.Add(thumbHost);
+
+        if (!string.IsNullOrWhiteSpace(item.ThumbnailUrl))
+        {
+            _ = LoadSearchThumbnailAsync(item.ThumbnailUrl, thumbImage, thumbPlaceholder, isYouTube);
+        }
+
+        var body = new StackPanel { Spacing = 6 };
+
+        var titleRow = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*"), ColumnSpacing = 8 };
+        titleRow.Children.Add(PlatformChip(item.Platform, accent, soft));
+        titleRow.Children.Add(new TextBlock
+        {
+            Text = item.Title,
+            FontSize = 13,
+            FontWeight = FontWeight.SemiBold,
+            Foreground = TextPrimary,
+            TextWrapping = TextWrapping.Wrap,
+            MaxLines = 2,
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            VerticalAlignment = VerticalAlignment.Center
+        });
+        // put title in column 1
+        Grid.SetColumn(titleRow.Children[^1], 1);
+        body.Children.Add(titleRow);
+
+        var meta = $"{item.Uploader ?? "-"}  ·  {FormatDuration(item.DurationSeconds)}  ·  {FormatCount(item.ViewCount)} \u6b21\u89c0\u770b";
+        body.Children.Add(new TextBlock
+        {
+            Text = meta,
+            FontSize = 11,
+            Foreground = TextMuted,
+            TextTrimming = TextTrimming.CharacterEllipsis
+        });
+
+        body.Children.Add(new TextBlock
+        {
+            Text = item.Url,
+            FontSize = 11,
+            Foreground = TextSecondary,
+            TextTrimming = TextTrimming.CharacterEllipsis
+        });
+
+        var actions = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 8,
+            Margin = new Thickness(0, 2, 0, 0)
+        };
+
+        var useBtn = CreateSoftButton("\u4f7f\u7528\u7db2\u5740", 96);
+        useBtn.MinHeight = 34;
+        useBtn.Click += (_, _) => UseSearchResult(item, parse: false, convert: false);
+
+        var parseBtn = CreatePrimaryButton("\u89e3\u6790\u9810\u89bd", 100);
+        parseBtn.MinHeight = 34;
+        parseBtn.Click += async (_, _) =>
+        {
+            UseSearchResult(item, parse: false, convert: false);
+            await ParseUrlCoreAsync();
+        };
+
+        var convertBtn = new Button
+        {
+            Content = "\u958b\u59cb\u8f49\u63db",
+            MinWidth = 100,
+            MinHeight = 34,
+            FontSize = 12,
+            FontWeight = FontWeight.SemiBold,
+            Foreground = Brushes.White,
+            Background = Green,
+            CornerRadius = new CornerRadius(10),
+            Cursor = new Cursor(StandardCursorType.Hand),
+            Padding = new Thickness(12, 6)
+        };
+        convertBtn.Click += async (_, _) =>
+        {
+            UseSearchResult(item, parse: false, convert: false);
+            await ConvertSelectedUrlsAsync();
+        };
+
+        var openBtn = CreateSoftButton("\u539f\u9801", 72);
+        openBtn.MinHeight = 34;
+        openBtn.Click += (_, _) => OpenOriginalPage(item.Url);
+
+        actions.Children.Add(useBtn);
+        actions.Children.Add(parseBtn);
+        actions.Children.Add(convertBtn);
+        actions.Children.Add(openBtn);
+        body.Children.Add(actions);
+
+        Grid.SetColumn(body, 1);
+        grid.Children.Add(body);
+        root.Child = grid;
+
+        root.PointerPressed += async (_, e) =>
+        {
+            // Double-click card to use + parse.
+            if (e.ClickCount >= 2 && e.GetCurrentPoint(root).Properties.IsLeftButtonPressed)
+            {
+                UseSearchResult(item, parse: false, convert: false);
+                await ParseUrlCoreAsync();
+            }
+        };
+
+        return root;
+    }
+
+    private void UseSearchResult(SearchVideoResult item, bool parse, bool convert)
+    {
+        _urlBox.Text = item.Url;
+        // Seed lightweight metadata so the download queue shows a real title
+        // even before the user runs full URL parsing.
+        _parsedInfo = new ParsedVideoInfo(
+            Title: item.Title,
+            DurationSeconds: item.DurationSeconds,
+            ViewCount: item.ViewCount,
+            ChannelFollowerCount: null,
+            UploadDate: null,
+            Url: item.Url,
+            ThumbnailUrl: item.ThumbnailUrl,
+            WebpageUrl: item.Url,
+            VideoId: item.VideoId,
+            ExtractorKey: item.Platform.Equals("Bilibili", StringComparison.OrdinalIgnoreCase) ? "BiliBili" : "Youtube",
+            ChannelName: item.Uploader);
+        Navigate("home");
+        SetStatus($"\u5df2\u9078\u7528\uff1a{item.Title}");
+        AppendLog($"\u641c\u5c0b\u9078\u7528 [{item.Platform}]: {item.Url}");
+        if (parse)
+        {
+            _ = ParseUrlCoreAsync();
+        }
+
+        if (convert)
+        {
+            _ = ConvertSelectedUrlsAsync();
+        }
+    }
+
+    private async Task ConvertSelectedUrlsAsync()
+    {
+        // Reuse the main convert entry point so queue / yt-dlp options stay consistent.
+        await ConvertOrCancelCoreAsync();
+    }
+
+    private async Task LoadSearchThumbnailAsync(
+        string thumbnailUrl,
+        Image image,
+        TextBlock placeholder,
+        bool isYouTube)
+    {
+        try
+        {
+            using var http = CreateSearchHttpClient();
+            if (!isYouTube)
+            {
+                http.DefaultRequestHeaders.TryAddWithoutValidation("Referer", "https://www.bilibili.com/");
+            }
+
+            var bytes = await http.GetByteArrayAsync(NormalizeThumbnailUrl(thumbnailUrl));
+            using var ms = new MemoryStream(bytes);
+            var bitmap = new Bitmap(ms);
+            await Dispatcher.UIThread.InvokeAsync(() =>
+            {
+                image.Source = bitmap;
+                image.IsVisible = true;
+                placeholder.IsVisible = false;
+            });
+        }
+        catch
+        {
+            // Thumbnail is optional; keep placeholder.
+        }
+    }
+
+    private async Task<IReadOnlyList<SearchVideoResult>> SearchYouTubeAsync(
+        string query,
+        int limit,
+        CancellationToken token)
+    {
+        var ytDlpPath = ToolLocator.FindExecutable("yt-dlp");
+        if (ytDlpPath is null)
+        {
+            AppendLog("YouTube \u641c\u5c0b\u5931\u6557: \u627e\u4e0d\u5230 yt-dlp");
+            return [];
+        }
+
+        limit = Math.Clamp(limit, 1, 50);
+        var searchUrl = $"ytsearch{limit}:{query}";
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = ytDlpPath,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+        startInfo.Environment["PYTHONIOENCODING"] = "utf-8";
+        startInfo.Environment["PYTHONUTF8"] = "1";
+        startInfo.ArgumentList.Add("--flat-playlist");
+        startInfo.ArgumentList.Add("--dump-single-json");
+        startInfo.ArgumentList.Add("--skip-download");
+        startInfo.ArgumentList.Add("--no-warnings");
+        startInfo.ArgumentList.Add("--encoding");
+        startInfo.ArgumentList.Add("utf-8");
+        startInfo.ArgumentList.Add(searchUrl);
+
+        using var process = new Process { StartInfo = startInfo };
+        if (!process.Start())
+        {
+            return [];
+        }
+
+        var stdoutTask = process.StandardOutput.ReadToEndAsync(token);
+        var stderrTask = process.StandardError.ReadToEndAsync(token);
+        await process.WaitForExitAsync(token);
+        var stdout = await stdoutTask;
+        var stderr = await stderrTask;
+
+        if (process.ExitCode != 0)
+        {
+            if (!string.IsNullOrWhiteSpace(stderr))
+            {
+                AppendLog($"YouTube \u641c\u5c0b\u932f\u8aa4: {stderr.Trim()}");
+            }
+
+            return [];
+        }
+
+        return ParseYtDlpSearchJson(stdout, "YouTube");
+    }
+
+    private async Task<IReadOnlyList<SearchVideoResult>> SearchBilibiliAsync(
+        string query,
+        int limit,
+        CancellationToken token)
+    {
+        limit = Math.Clamp(limit, 1, 50);
+
+        // Prefer official search API (more reliable than bilisearch when anti-bot is active).
+        try
+        {
+            var apiResults = await SearchBilibiliApiAsync(query, limit, token);
+            if (apiResults.Count > 0)
+            {
+                return apiResults;
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            AppendLog($"Bilibili API \u641c\u5c0b\u5931\u6557: {ex.Message}");
+        }
+
+        // Fallback: yt-dlp bilisearch (may fail with HTTP 412 in some networks).
+        return await SearchBilibiliViaYtDlpAsync(query, limit, token);
+    }
+
+    private async Task<IReadOnlyList<SearchVideoResult>> SearchBilibiliApiAsync(
+        string query,
+        int limit,
+        CancellationToken token)
+    {
+        var pageSize = Math.Clamp(limit, 1, 50);
+        var url =
+            "https://api.bilibili.com/x/web-interface/search/type"
+            + "?search_type=video"
+            + $"&keyword={Uri.EscapeDataString(query)}"
+            + "&page=1"
+            + $"&page_size={pageSize}"
+            + "&order=totalrank";
+
+        using var http = CreateSearchHttpClient();
+        http.DefaultRequestHeaders.TryAddWithoutValidation("Referer", "https://search.bilibili.com");
+        http.DefaultRequestHeaders.TryAddWithoutValidation("Origin", "https://search.bilibili.com");
+
+        using var response = await http.GetAsync(url, token);
+        var body = await response.Content.ReadAsStringAsync(token);
+        if (!response.IsSuccessStatusCode)
+        {
+            AppendLog($"Bilibili API HTTP {(int)response.StatusCode}: {TruncateForLog(body, 200)}");
+            return [];
+        }
+
+        using var doc = JsonDocument.Parse(body);
+        var root = doc.RootElement;
+        if (!root.TryGetProperty("code", out var codeEl) || codeEl.GetInt32() != 0)
+        {
+            var msg = root.TryGetProperty("message", out var m) ? m.GetString() : "unknown";
+            AppendLog($"Bilibili API code error: {msg}");
+            return [];
+        }
+
+        if (!root.TryGetProperty("data", out var data)
+            || !data.TryGetProperty("result", out var result)
+            || result.ValueKind != JsonValueKind.Array)
+        {
+            return [];
+        }
+
+        var list = new List<SearchVideoResult>();
+        foreach (var entry in result.EnumerateArray())
+        {
+            if (entry.TryGetProperty("type", out var typeEl))
+            {
+                var type = typeEl.GetString();
+                if (!string.IsNullOrWhiteSpace(type)
+                    && !type.Equals("video", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+            }
+
+            var bvid = entry.TryGetProperty("bvid", out var bv) ? bv.GetString() : null;
+            if (string.IsNullOrWhiteSpace(bvid))
+            {
+                continue;
+            }
+
+            var titleRaw = entry.TryGetProperty("title", out var t) ? t.GetString() : null;
+            var title = StripHtml(titleRaw) ?? bvid;
+            var author = entry.TryGetProperty("author", out var a) ? a.GetString() : null;
+            long? views = null;
+            if (entry.TryGetProperty("play", out var play))
+            {
+                views = play.ValueKind == JsonValueKind.Number
+                    ? play.GetInt64()
+                    : long.TryParse(play.GetString(), out var p) ? p : null;
+            }
+
+            double? duration = null;
+            if (entry.TryGetProperty("duration", out var durEl))
+            {
+                duration = ParseDurationText(durEl.GetString());
+            }
+
+            var pic = entry.TryGetProperty("pic", out var picEl) ? picEl.GetString() : null;
+            var webpage = $"https://www.bilibili.com/video/{bvid}/";
+
+            list.Add(new SearchVideoResult(
+                Platform: "Bilibili",
+                Title: title,
+                Url: webpage,
+                Uploader: author,
+                DurationSeconds: duration,
+                ViewCount: views,
+                ThumbnailUrl: NormalizeThumbnailUrl(pic),
+                VideoId: bvid));
+
+            if (list.Count >= limit)
+            {
+                break;
+            }
+        }
+
+        return list;
+    }
+
+    private async Task<IReadOnlyList<SearchVideoResult>> SearchBilibiliViaYtDlpAsync(
+        string query,
+        int limit,
+        CancellationToken token)
+    {
+        var ytDlpPath = ToolLocator.FindExecutable("yt-dlp");
+        if (ytDlpPath is null)
+        {
+            return [];
+        }
+
+        limit = Math.Clamp(limit, 1, 50);
+        var searchUrl = $"bilisearch{limit}:{query}";
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = ytDlpPath,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+        startInfo.Environment["PYTHONIOENCODING"] = "utf-8";
+        startInfo.Environment["PYTHONUTF8"] = "1";
+        startInfo.ArgumentList.Add("--flat-playlist");
+        startInfo.ArgumentList.Add("--dump-single-json");
+        startInfo.ArgumentList.Add("--skip-download");
+        startInfo.ArgumentList.Add("--no-warnings");
+        startInfo.ArgumentList.Add("--encoding");
+        startInfo.ArgumentList.Add("utf-8");
+        // Reuse the same browser-like headers used for video pages.
+        startInfo.ArgumentList.Add("--add-headers");
+        startInfo.ArgumentList.Add("User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36");
+        startInfo.ArgumentList.Add("--add-headers");
+        startInfo.ArgumentList.Add("Referer:https://www.bilibili.com/");
+        startInfo.ArgumentList.Add("--add-headers");
+        startInfo.ArgumentList.Add("Accept-Language:zh-CN,zh-TW;q=0.9,zh;q=0.8,en;q=0.7");
+        startInfo.ArgumentList.Add(searchUrl);
+
+        using var process = new Process { StartInfo = startInfo };
+        if (!process.Start())
+        {
+            return [];
+        }
+
+        var stdoutTask = process.StandardOutput.ReadToEndAsync(token);
+        var stderrTask = process.StandardError.ReadToEndAsync(token);
+        await process.WaitForExitAsync(token);
+        var stdout = await stdoutTask;
+        var stderr = await stderrTask;
+
+        if (process.ExitCode != 0)
+        {
+            if (!string.IsNullOrWhiteSpace(stderr))
+            {
+                AppendLog($"Bilibili yt-dlp \u641c\u5c0b\u932f\u8aa4: {stderr.Trim()}");
+            }
+
+            return [];
+        }
+
+        return ParseYtDlpSearchJson(stdout, "Bilibili");
+    }
+
+    private static List<SearchVideoResult> ParseYtDlpSearchJson(string stdout, string platform)
+    {
+        var list = new List<SearchVideoResult>();
+        if (string.IsNullOrWhiteSpace(stdout))
+        {
+            return list;
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(stdout);
+            var root = doc.RootElement;
+            if (!root.TryGetProperty("entries", out var entries) || entries.ValueKind != JsonValueKind.Array)
+            {
+                // Single result fallback.
+                if (TryMapSearchEntry(root, platform) is { } single)
+                {
+                    list.Add(single);
+                }
+
+                return list;
+            }
+
+            foreach (var entry in entries.EnumerateArray())
+            {
+                if (TryMapSearchEntry(entry, platform) is { } item)
+                {
+                    list.Add(item);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            // Caller logs at higher level if needed; keep silent here.
+            _ = ex;
+        }
+
+        return list;
+    }
+
+    private static SearchVideoResult? TryMapSearchEntry(JsonElement entry, string platform)
+    {
+        if (entry.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        var id = entry.TryGetProperty("id", out var idEl) ? idEl.GetString() : null;
+        var title = entry.TryGetProperty("title", out var t) ? t.GetString() : null;
+        if (string.IsNullOrWhiteSpace(title) && string.IsNullOrWhiteSpace(id))
+        {
+            return null;
+        }
+
+        string? url = null;
+        if (entry.TryGetProperty("webpage_url", out var wu))
+        {
+            url = wu.GetString();
+        }
+
+        if (string.IsNullOrWhiteSpace(url) && entry.TryGetProperty("url", out var u))
+        {
+            url = u.GetString();
+        }
+
+        if (string.IsNullOrWhiteSpace(url) && !string.IsNullOrWhiteSpace(id))
+        {
+            url = platform.Equals("Bilibili", StringComparison.OrdinalIgnoreCase)
+                ? (id.StartsWith("BV", StringComparison.OrdinalIgnoreCase)
+                    ? $"https://www.bilibili.com/video/{id}/"
+                    : $"https://www.bilibili.com/video/av{id}/")
+                : $"https://www.youtube.com/watch?v={id}";
+        }
+
+        if (string.IsNullOrWhiteSpace(url) || !url.StartsWith("http", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        // Flat playlist entries sometimes put the raw id into url without scheme.
+        if (!url.StartsWith("http", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        var uploader = entry.TryGetProperty("uploader", out var up) ? up.GetString() : null;
+        if (string.IsNullOrWhiteSpace(uploader) && entry.TryGetProperty("channel", out var ch))
+        {
+            uploader = ch.GetString();
+        }
+
+        double? duration = entry.TryGetProperty("duration", out var d) && d.ValueKind == JsonValueKind.Number
+            ? d.GetDouble()
+            : null;
+        long? views = entry.TryGetProperty("view_count", out var v) && v.ValueKind == JsonValueKind.Number
+            ? v.GetInt64()
+            : null;
+
+        string? thumb = null;
+        if (entry.TryGetProperty("thumbnails", out var thumbs) && thumbs.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var th in thumbs.EnumerateArray())
+            {
+                if (th.TryGetProperty("url", out var thUrl) && thUrl.GetString() is { Length: > 0 } rawThumb)
+                {
+                    thumb = rawThumb;
+                }
+            }
+        }
+
+        if (string.IsNullOrWhiteSpace(thumb) && entry.TryGetProperty("thumbnail", out var singleThumb))
+        {
+            thumb = singleThumb.GetString();
+        }
+
+        return new SearchVideoResult(
+            Platform: platform,
+            Title: title ?? id ?? "\u672a\u77e5\u6a19\u984c",
+            Url: url,
+            Uploader: uploader,
+            DurationSeconds: duration,
+            ViewCount: views,
+            ThumbnailUrl: NormalizeThumbnailUrl(thumb),
+            VideoId: id);
+    }
+
+    private static HttpClient CreateSearchHttpClient()
+    {
+        var http = new HttpClient
+        {
+            Timeout = TimeSpan.FromSeconds(25)
+        };
+        http.DefaultRequestHeaders.TryAddWithoutValidation(
+            "User-Agent",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36");
+        http.DefaultRequestHeaders.TryAddWithoutValidation(
+            "Accept",
+            "application/json, text/plain, */*");
+        http.DefaultRequestHeaders.TryAddWithoutValidation(
+            "Accept-Language",
+            "zh-CN,zh-TW;q=0.9,zh;q=0.8,en;q=0.7");
+        return http;
+    }
+
+    private static string? NormalizeThumbnailUrl(string? url)
+    {
+        if (string.IsNullOrWhiteSpace(url))
+        {
+            return null;
+        }
+
+        if (url.StartsWith("//", StringComparison.Ordinal))
+        {
+            return "https:" + url;
+        }
+
+        if (url.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+            || url.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+        {
+            return url;
+        }
+
+        return "https://" + url.TrimStart('/');
+    }
+
+    private static string? StripHtml(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return text;
+        }
+
+        // Bilibili search titles wrap keywords in <em class="keyword">...</em>
+        var noTags = Regex.Replace(text, "<.*?>", string.Empty);
+        return System.Net.WebUtility.HtmlDecode(noTags).Trim();
+    }
+
+    private static double? ParseDurationText(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return null;
+        }
+
+        var parts = text.Trim().Split(':', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (parts.Length is < 2 or > 3)
+        {
+            return null;
+        }
+
+        try
+        {
+            if (parts.Length == 2
+                && int.TryParse(parts[0], out var m)
+                && int.TryParse(parts[1], out var s))
+            {
+                return m * 60 + s;
+            }
+
+            if (parts.Length == 3
+                && int.TryParse(parts[0], out var h)
+                && int.TryParse(parts[1], out var m2)
+                && int.TryParse(parts[2], out var s2))
+            {
+                return h * 3600 + m2 * 60 + s2;
+            }
+        }
+        catch
+        {
+            return null;
+        }
+
+        return null;
+    }
+
+    private static string FormatCount(long? value) =>
+        value is null ? "-" : value.Value.ToString("N0");
+
+    private static int PlatformRank(string platform) =>
+        platform.Equals("YouTube", StringComparison.OrdinalIgnoreCase) ? 0
+        : platform.Equals("Bilibili", StringComparison.OrdinalIgnoreCase) ? 1
+        : 2;
 
     private async Task ParseUrlCoreAsync()
     {
@@ -3085,6 +4094,17 @@ public sealed class MainWindow : Window
         if (_conversionTokenSource is not null)
         {
             _conversionTokenSource.Cancel();
+            return;
+        }
+
+        await ConvertOrCancelCoreAsync();
+    }
+
+    private async Task ConvertOrCancelCoreAsync()
+    {
+        if (_conversionTokenSource is not null)
+        {
+            SetStatus("\u5df2\u6709\u8f49\u63db\u4efb\u52d9\u9032\u884c\u4e2d");
             return;
         }
 
@@ -4851,6 +5871,16 @@ public sealed class MainWindow : Window
         double? AvailableDurationSeconds = null,
         bool IsPreviewOnly = false,
         string? AccessWarning = null);
+
+    private sealed record SearchVideoResult(
+        string Platform,
+        string Title,
+        string Url,
+        string? Uploader,
+        double? DurationSeconds,
+        long? ViewCount,
+        string? ThumbnailUrl,
+        string? VideoId);
 
     private enum DownloadState
     {
