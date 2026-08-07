@@ -1,0 +1,10 @@
+bin/
+obj/
+dist/
+publish/
+release-staging/
+*.app/
+.local/
+.DS_Store
+*.user
+*.suo

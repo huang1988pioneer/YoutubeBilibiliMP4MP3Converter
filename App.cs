@@ -1,0 +1,26 @@
+using Avalonia;
+using Avalonia.Controls.ApplicationLifetimes;
+using Avalonia.Styling;
+using Avalonia.Themes.Fluent;
+
+namespace YoutubeOrBilibiliMP3Converter;
+
+public sealed class App : Application
+{
+    public override void Initialize()
+    {
+        Name = "影音轉換大師";
+        Styles.Add(new FluentTheme());
+        RequestedThemeVariant = ThemeVariant.Light;
+    }
+
+    public override void OnFrameworkInitializationCompleted()
+    {
+        if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
+        {
+            desktop.MainWindow = new MainWindow();
+        }
+
+        base.OnFrameworkInitializationCompleted();
+    }
+}
