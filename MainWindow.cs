@@ -1681,23 +1681,52 @@ public sealed class MainWindow : Window
             _parsedInfo = info;
             _previewTitle.Text = info.Title;
             _previewDuration.Text = $"\u6642\u9577:  {FormatDuration(info.DurationSeconds)}";
+            if (info.IsPreviewOnly && info.AvailableDurationSeconds is not null)
+            {
+                _previewDuration.Text +=
+                    $"  (\u53ef\u4e0b\u8f09\u7d04 {FormatDuration(info.AvailableDurationSeconds)})";
+            }
+
             _previewViews.Text = info.IsChannel
                 ? "\u5f71\u7247\u89c0\u770b:  -"
                 : $"\u6b21\u6578:  {info.ViewCount?.ToString("N0") ?? "-"}";
             _previewChannelFollowers.Text = $"\u983b\u9053\u95dc\u6ce8:  {info.ChannelFollowerCount?.ToString("N0") ?? "-"}";
             _previewDate.Text = $"\u65e5\u671f:  {info.UploadDate ?? "-"}";
-            _previewStatus.Text = info.IsChannel
-                ? "\u983b\u9053\u8cc7\u8a0a\u89e3\u6790\u6210\u529f"
-                : "\u89e3\u6790\u6210\u529f \u00b7 \u53ef\u5167\u5d4c\u64ad\u653e";
-            _previewStatus.Foreground = Green;
+            if (!string.IsNullOrWhiteSpace(info.AccessWarning))
+            {
+                _previewStatus.Text = info.AccessWarning;
+                _previewStatus.Foreground = Brush.Parse("#F59E0B");
+                SetStatus(info.AccessWarning);
+            }
+            else
+            {
+                _previewStatus.Text = info.IsChannel
+                    ? "\u983b\u9053\u8cc7\u8a0a\u89e3\u6790\u6210\u529f"
+                    : "\u89e3\u6790\u6210\u529f \u00b7 \u53ef\u5167\u5d4c\u64ad\u653e";
+                _previewStatus.Foreground = Green;
+                SetStatus($"\u89e3\u6790\u6210\u529f\uff1a{info.Title}");
+            }
+
             _previewPlayButton.IsEnabled = !info.IsChannel;
             _previewBrowserButton.IsEnabled = true;
-            SetStatus($"\u89e3\u6790\u6210\u529f\uff1a{info.Title}");
             AppendLog($"\u6a19\u984c: {info.Title}");
             if (info.DurationSeconds is not null)
             {
                 AppendLog($"\u6642\u9577: {FormatDuration(info.DurationSeconds)}");
             }
+            if (info.AvailableDurationSeconds is not null
+                && info.DurationSeconds is not null
+                && info.AvailableDurationSeconds + 5 < info.DurationSeconds)
+            {
+                AppendLog(
+                    $"\u53ef\u4e0b\u8f09\u4e32\u6d41\u6642\u9577: {FormatDuration(info.AvailableDurationSeconds)} (\u53ef\u80fd\u70ba\u8a66\u770b\u7247\u6bb5)");
+            }
+
+            if (!string.IsNullOrWhiteSpace(info.AccessWarning))
+            {
+                AppendLog($"\u8b66\u544a: {info.AccessWarning}");
+            }
+
             if (info.ViewCount is not null)
             {
                 AppendLog($"\u89c0\u770b\u6b21\u6578: {info.ViewCount.Value:N0}");
@@ -1812,13 +1841,107 @@ public sealed class MainWindow : Window
                 channelName = uploader.GetString();
             }
 
-            return new ParsedVideoInfo(title, duration, views, channelFollowers, upload, url, thumbnail, webpage, id, extractor, channelName);
+            var availableDuration = ExtractMaxFormatDurationSeconds(root);
+            var description = root.TryGetProperty("description", out var desc) ? desc.GetString() : null;
+            var availability = root.TryGetProperty("availability", out var av) ? av.GetString() : null;
+            var (isPreviewOnly, accessWarning) = DetectLimitedAccess(
+                title,
+                description,
+                availability,
+                duration,
+                availableDuration,
+                IsBilibiliVideoUrl(url));
+
+            return new ParsedVideoInfo(
+                title,
+                duration ?? availableDuration,
+                views,
+                channelFollowers,
+                upload,
+                url,
+                thumbnail,
+                webpage,
+                id,
+                extractor,
+                channelName,
+                ExpectedDurationSeconds: duration ?? availableDuration,
+                AvailableDurationSeconds: availableDuration,
+                IsPreviewOnly: isPreviewOnly,
+                AccessWarning: accessWarning);
         }
         catch (Exception ex)
         {
             AppendLog($"JSON \u89e3\u6790\u5931\u6557: {ex.Message}");
             return null;
         }
+    }
+
+    private static double? ExtractMaxFormatDurationSeconds(JsonElement root)
+    {
+        double? max = null;
+        if (!root.TryGetProperty("formats", out var formats) || formats.ValueKind != JsonValueKind.Array)
+        {
+            return null;
+        }
+
+        foreach (var format in formats.EnumerateArray())
+        {
+            if (format.TryGetProperty("duration", out var d) && d.ValueKind == JsonValueKind.Number)
+            {
+                var value = d.GetDouble();
+                if (value > 0 && (max is null || value > max))
+                {
+                    max = value;
+                }
+            }
+        }
+
+        return max;
+    }
+
+    private static (bool IsPreviewOnly, string? AccessWarning) DetectLimitedAccess(
+        string title,
+        string? description,
+        string? availability,
+        double? metadataDuration,
+        double? availableDuration,
+        bool isBilibili)
+    {
+        var text = $"{title}\n{description ?? ""}";
+        var looksChargeExclusive =
+            text.Contains("\u5145\u7535\u4e13\u5c5e", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("\u5145\u96fb\u5c08\u5c6c", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("\u8a66\u770b", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("\u8bd5\u770b", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("\u4f1a\u5458\u4e13\u5c5e", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("\u6703\u54e1\u5c08\u5c6c", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("members-only", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("member only", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(availability, "subscriber_only", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(availability, "premium_only", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(availability, "needs_auth", StringComparison.OrdinalIgnoreCase);
+
+        // Stream shorter than claimed length => free preview / locked full video.
+        var durationMismatch = metadataDuration is > 30
+            && availableDuration is > 0
+            && availableDuration + 15 < metadataDuration * 0.85;
+
+        if (!durationMismatch && !looksChargeExclusive)
+        {
+            return (false, null);
+        }
+
+        if (isBilibili || looksChargeExclusive || durationMismatch)
+        {
+            var claimed = FormatDuration(metadataDuration);
+            var available = FormatDuration(availableDuration ?? metadataDuration);
+            var warning = durationMismatch
+                ? $"\u6b64\u5f71\u7247\u53ef\u80fd\u70ba\u300c\u5145\u96fb\u5c08\u5c6c\u300d\u6216\u6703\u54e1\u9650\u5236\uff1a\u5b8c\u6574\u7d04 {claimed}\uff0c\u76ee\u524d\u53ea\u80fd\u4e0b\u8f09\u8a66\u770b\u7d04 {available}\u3002\u8acb\u5148\u5c0d\u8a72 UP \u5305\u6708\u5145\u96fb\uff0c\u4e26\u7528\u5df2\u767b\u5165 B \u7ad9\u7684\u700f\u89bd\u5668 cookies \u518d\u4e0b\u8f09\u3002"
+                : "\u6b64\u5f71\u7247\u53ef\u80fd\u70ba\u300c\u5145\u96fb\u5c08\u5c6c\u300d/\u6703\u54e1\u9650\u5236\u5167\u5bb9\u3002\u672a\u89e3\u9396\u6642\u53ea\u80fd\u4e0b\u8f09\u8a66\u770b\u7247\u6bb5\uff1b\u8acb\u5148\u5c0d UP \u5305\u6708\u5145\u96fb\u4e26\u4f7f\u7528\u5df2\u767b\u5165\u7684\u700f\u89bd\u5668 cookies\u3002";
+            return (durationMismatch || looksChargeExclusive, warning);
+        }
+
+        return (false, null);
     }
 
     private async Task<ParsedVideoInfo?> DumpChannelInfoAsync(string ytDlpPath, string channelUrl)
@@ -2841,6 +2964,11 @@ public sealed class MainWindow : Window
                     successCount++;
                     item.SetState(DownloadState.Completed);
                     item.SetProgress(100, "\u5b8c\u6210");
+                    await WarnIfDownloadedDurationIsShortAsync(
+                        ffprobePath,
+                        outputPath,
+                        item.Format,
+                        item.Url);
                     _todayDownloads++;
                     SaveSettingsIfPossible();
                     UpdateFooter();
@@ -3632,13 +3760,7 @@ public sealed class MainWindow : Window
             var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
             var programFilesX86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
 
-            if (Directory.Exists(IoPath.Combine(localAppData, "Mozilla", "Firefox"))
-                || Directory.Exists(IoPath.Combine(programFiles, "Mozilla Firefox"))
-                || Directory.Exists(IoPath.Combine(programFilesX86, "Mozilla Firefox")))
-            {
-                return "firefox";
-            }
-
+            // Prefer Chromium browsers first: most Bilibili sessions (incl. 包月充电) live there.
             if (Directory.Exists(IoPath.Combine(localAppData, "Google", "Chrome"))
                 || Directory.Exists(IoPath.Combine(programFiles, "Google", "Chrome"))
                 || Directory.Exists(IoPath.Combine(programFilesX86, "Google", "Chrome")))
@@ -3651,6 +3773,13 @@ public sealed class MainWindow : Window
                 || Directory.Exists(IoPath.Combine(programFilesX86, "Microsoft", "Edge")))
             {
                 return "edge";
+            }
+
+            if (Directory.Exists(IoPath.Combine(localAppData, "Mozilla", "Firefox"))
+                || Directory.Exists(IoPath.Combine(programFiles, "Mozilla Firefox"))
+                || Directory.Exists(IoPath.Combine(programFilesX86, "Mozilla Firefox")))
+            {
+                return "firefox";
             }
         }
 
@@ -4097,6 +4226,101 @@ public sealed class MainWindow : Window
         }
     }
 
+    private async Task WarnIfDownloadedDurationIsShortAsync(
+        string ffprobePath,
+        string outputDir,
+        string format,
+        string url)
+    {
+        try
+        {
+            var mediaPath = ResolveMediaPath(outputDir, _lastMediaOutputPath, format);
+            if (string.IsNullOrWhiteSpace(mediaPath) || !File.Exists(mediaPath))
+            {
+                return;
+            }
+
+            var actual = await ProbeMediaDurationSecondsAsync(ffprobePath, mediaPath);
+            if (actual is null or <= 0)
+            {
+                return;
+            }
+
+            AppendLog($"\u5be6\u969b\u6a94\u6848\u6642\u9577: {FormatDuration(actual)} ({IoPath.GetFileName(mediaPath)})");
+
+            double? expected = null;
+            if (_parsedInfo is not null
+                && (string.Equals(_parsedInfo.Url, url, StringComparison.OrdinalIgnoreCase)
+                    || (!string.IsNullOrWhiteSpace(_parsedInfo.WebpageUrl)
+                        && string.Equals(_parsedInfo.WebpageUrl, url, StringComparison.OrdinalIgnoreCase))))
+            {
+                expected = _parsedInfo.ExpectedDurationSeconds ?? _parsedInfo.DurationSeconds;
+            }
+
+            // Bilibili charge-exclusive free preview is often ~10 minutes of a longer video.
+            if (expected is > 30 && actual + 20 < expected * 0.85)
+            {
+                var warning =
+                    $"\u8b66\u544a\uff1a\u4e0b\u8f09\u6a94\u6642\u9577 ({FormatDuration(actual)}) \u660e\u986f\u77ed\u65bc\u5f71\u7247\u5ba3\u7a31\u6642\u9577 ({FormatDuration(expected)})\u3002"
+                    + (IsBilibiliVideoUrl(url)
+                        ? " \u9019\u901a\u5e38\u662f B \u7ad9\u300c\u5145\u96fb\u5c08\u5c6c\u300d\u8a66\u770b\u7247\u6bb5\uff1b\u82e5\u8981\u5b8c\u6574\u7248\uff0c\u8acb\u5148\u5c0d\u8a72 UP \u5305\u6708\u5145\u96fb\uff0c\u4e26\u78ba\u8a8d\u7528\u5df2\u767b\u5165\u7684\u700f\u89bd\u5668 cookies \u518d\u4e0b\u8f09\u3002"
+                        : " \u53ef\u80fd\u70ba\u6703\u54e1/\u5340\u57df/\u6b0a\u9650\u9650\u5236\u4e0b\u7684\u9810\u89bd\u7247\u6bb5\u3002");
+                AppendLog(warning);
+                SetStatus(
+                    $"\u5b8c\u6210\uff08\u4f46\u50c5\u8a66\u770b {FormatDuration(actual)} / \u5ba3\u7a31 {FormatDuration(expected)}\uff09");
+            }
+            else if (IsBilibiliVideoUrl(url)
+                     && _parsedInfo?.IsPreviewOnly == true
+                     && _parsedInfo.AvailableDurationSeconds is not null
+                     && Math.Abs(actual.Value - _parsedInfo.AvailableDurationSeconds.Value) < 30)
+            {
+                AppendLog(
+                    "\u63d0\u793a\uff1a\u6b64\u6b21\u4e0b\u8f09\u7684\u662f\u8a66\u770b\u53ef\u7528\u7247\u6bb5\uff08\u975e\u5b8c\u6574\u7248\uff09\u3002");
+            }
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"\u6642\u9577\u6aa2\u67e5\u5931\u6557: {ex.Message}");
+        }
+    }
+
+    private static async Task<double?> ProbeMediaDurationSecondsAsync(string ffprobePath, string mediaPath)
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = ffprobePath,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+        startInfo.ArgumentList.Add("-v");
+        startInfo.ArgumentList.Add("error");
+        startInfo.ArgumentList.Add("-show_entries");
+        startInfo.ArgumentList.Add("format=duration");
+        startInfo.ArgumentList.Add("-of");
+        startInfo.ArgumentList.Add("default=noprint_wrappers=1:nokey=1");
+        startInfo.ArgumentList.Add(mediaPath);
+
+        using var process = new Process { StartInfo = startInfo };
+        if (!process.Start())
+        {
+            return null;
+        }
+
+        var stdout = await process.StandardOutput.ReadToEndAsync();
+        await process.WaitForExitAsync();
+        if (process.ExitCode != 0)
+        {
+            return null;
+        }
+
+        var text = stdout.Trim();
+        return double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var seconds)
+            ? seconds
+            : null;
+    }
+
     private sealed record NavItem(string Id, Border Border);
     private sealed record PreviewStreamInfo(string Url, string Referer);
     private sealed record ParsedVideoInfo(
@@ -4111,7 +4335,11 @@ public sealed class MainWindow : Window
         string? VideoId = null,
         string? ExtractorKey = null,
         string? ChannelName = null,
-        bool IsChannel = false);
+        bool IsChannel = false,
+        double? ExpectedDurationSeconds = null,
+        double? AvailableDurationSeconds = null,
+        bool IsPreviewOnly = false,
+        string? AccessWarning = null);
 
     private enum DownloadState
     {
