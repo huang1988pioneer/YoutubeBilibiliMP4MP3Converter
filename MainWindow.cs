@@ -91,6 +91,7 @@ public sealed class MainWindow : Window
     private readonly Ellipse _mp4Radio;
     private readonly Ellipse _mp3Radio;
     private readonly CheckBox _subtitleCheckBox;
+    private readonly CheckBox _playlistCheckBox;
     private readonly TextBlock _cookiesPathLabel;
     private readonly Button _cookiesBrowseButton;
     private readonly Button _cookiesClearButton;
@@ -99,6 +100,7 @@ public sealed class MainWindow : Window
     private string _outputFormat = "MP4";
     private string _mp4Quality = "1080P";
     private bool _includeSubtitles = false;
+    private bool _downloadPlaylist = false;
     private string _activeNav = "home";
     private int _todayDownloads;
     private string _lastSpeed = "-";
@@ -133,6 +135,7 @@ public sealed class MainWindow : Window
         _outputFormat = settings.OutputFormat;
         _mp4Quality = NormalizeMp4Quality(settings.Mp4Quality);
         _includeSubtitles = settings.IncludeSubtitles ?? false;
+        _downloadPlaylist = settings.DownloadPlaylist ?? false;
         _todayDownloads = settings.TodayDownloadCount;
         if (settings.TodayDate != DateOnly.FromDateTime(DateTime.Now))
         {
@@ -228,6 +231,23 @@ public sealed class MainWindow : Window
             SetStatus(_includeSubtitles
                 ? "\u5df2\u958b\u555f\u5b57\u5e55\u642d\u914d\uff1a\u6703\u4e0b\u8f09\u4e26\u5c0d\u9f4a\u5f71\u97f3\u6a94"
                 : "\u5df2\u95dc\u9589\u5b57\u5e55\u642d\u914d");
+        };
+
+        _playlistCheckBox = new CheckBox
+        {
+            Content = "\u4e0b\u8f09\u6574\u4efd\u64ad\u653e\u6e05\u55ae\uff08\u9810\u8a2d\u95dc\u9589\uff0c\u50c5\u4e0b\u7576\u524d\u5f71\u7247\uff09",
+            IsChecked = _downloadPlaylist,
+            FontSize = 13,
+            Foreground = TextPrimary,
+            Margin = new Thickness(0, 2, 0, 0)
+        };
+        _playlistCheckBox.IsCheckedChanged += (_, _) =>
+        {
+            _downloadPlaylist = _playlistCheckBox.IsChecked == true;
+            SaveSettingsIfPossible();
+            SetStatus(_downloadPlaylist
+                ? "\u5df2\u958b\u555f\u64ad\u653e\u6e05\u55ae\u4e0b\u8f09\uff1a\u6703\u4e0b\u8f09\u7db2\u5740\u6240\u5c6c\u6574\u4efd\u6e05\u55ae"
+                : "\u5df2\u95dc\u9589\u64ad\u653e\u6e05\u55ae\u4e0b\u8f09\uff1a\u50c5\u8f49\u63db\u55ae\u4e00\u5f71\u7247");
         };
 
         _cookiesFilePath = settings.CookieFilePath;
@@ -1039,6 +1059,7 @@ public sealed class MainWindow : Window
         DetachFromParent(_mp3Card);
         DetachFromParent(_qualityCombo);
         DetachFromParent(_subtitleCheckBox);
+        DetachFromParent(_playlistCheckBox);
         DetachFromParent(_outputBox);
         DetachFromParent(_browseButton);
         DetachFromParent(_convertButton);
@@ -1195,6 +1216,7 @@ public sealed class MainWindow : Window
         qualityPanel.Children.Add(_qualityCombo);
         left.Children.Add(qualityPanel);
         left.Children.Add(_subtitleCheckBox);
+        left.Children.Add(_playlistCheckBox);
 
         // Cookies file import row
         left.Children.Add(new TextBlock
@@ -3052,7 +3074,7 @@ public sealed class MainWindow : Window
         var text = _urlBox.Text ?? "";
         return text
             .Split(['\r', '\n', ' ', '\t'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Select(NormalizeMediaUrl)
+            .Select(u => NormalizeMediaUrl(u, preservePlaylistParams: _downloadPlaylist))
             .Where(u => u.StartsWith("http", StringComparison.OrdinalIgnoreCase))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
@@ -3097,9 +3119,17 @@ public sealed class MainWindow : Window
 
         foreach (var url in urls)
         {
-            var title = _parsedInfo is not null && string.Equals(_parsedInfo.Url, url, StringComparison.OrdinalIgnoreCase)
+            var title = _parsedInfo is not null
+                && (string.Equals(_parsedInfo.Url, url, StringComparison.OrdinalIgnoreCase)
+                    || UrlsLikelySameVideo(_parsedInfo.Url, url)
+                    || UrlsLikelySameVideo(_parsedInfo.WebpageUrl, url))
                 ? _parsedInfo.Title
                 : url;
+            if (_downloadPlaylist && LooksLikePlaylistUrl(url))
+            {
+                title = "\u64ad\u653e\u6e05\u55ae \u00b7 " + title;
+            }
+
             var item = new DownloadItemView(title, url, _outputFormat, _mp4Quality);
             item.OnRemove = () =>
             {
@@ -3135,6 +3165,10 @@ public sealed class MainWindow : Window
         {
             AppendLog($"MP4 \u756b\u8cea: {_mp4Quality}");
         }
+
+        AppendLog(_downloadPlaylist
+            ? "\u64ad\u653e\u6e05\u55ae: \u958b\u555f\uff08\u6574\u4efd\u4e0b\u8f09\uff09"
+            : "\u64ad\u653e\u6e05\u55ae: \u95dc\u9589\uff08\u50c5\u55ae\u4e00\u5f71\u7247\uff09");
 
         AppendLog(_includeSubtitles
             ? "\u5b57\u5e55: \u958b\u555f\uff08\u4e2d\u6587\u512a\u5148\uff0c\u5916\u639b .srt\uff1bMP4 \u5167\u5d4c\uff1bMP3 \u751f\u6210 .lrc\uff09"
@@ -3296,8 +3330,8 @@ public sealed class MainWindow : Window
         startInfo.ArgumentList.Add("8");
         startInfo.ArgumentList.Add("--fragment-retries");
         startInfo.ArgumentList.Add("8");
-        // Default: ignore attached playlists (watch?v=...&list=...). Only the single video.
-        startInfo.ArgumentList.Add("--no-playlist");
+        // Optional full playlist download; default remains single-video only.
+        startInfo.ArgumentList.Add(_downloadPlaylist ? "--yes-playlist" : "--no-playlist");
 
         // Subtitles are handled in a separate pass so HTTP 429 on captions cannot abort media.
         if (includeSubtitles)
@@ -3330,8 +3364,11 @@ public sealed class MainWindow : Window
         startInfo.ArgumentList.Add("--paths");
         startInfo.ArgumentList.Add(outputPath);
         startInfo.ArgumentList.Add("--output");
-        startInfo.ArgumentList.Add("%(title)s.%(ext)s");
-        startInfo.ArgumentList.Add(NormalizeMediaUrl(url));
+        // Playlist mode: number files so titles don't collide across entries.
+        startInfo.ArgumentList.Add(_downloadPlaylist
+            ? "%(playlist_index&{} - |)s%(title)s.%(ext)s"
+            : "%(title)s.%(ext)s");
+        startInfo.ArgumentList.Add(NormalizeMediaUrl(url, preservePlaylistParams: _downloadPlaylist));
 
         return await RunProcessAsync(startInfo, token, item);
     }
@@ -3377,7 +3414,7 @@ public sealed class MainWindow : Window
             startInfo.ArgumentList.Add("--ffmpeg-location");
             startInfo.ArgumentList.Add(IoPath.GetDirectoryName(ffmpegPath) ?? ffmpegPath);
             startInfo.ArgumentList.Add("--newline");
-            startInfo.ArgumentList.Add("--no-playlist");
+            startInfo.ArgumentList.Add(_downloadPlaylist ? "--yes-playlist" : "--no-playlist");
             startInfo.ArgumentList.Add("--ignore-errors");
             startInfo.ArgumentList.Add("--retries");
             startInfo.ArgumentList.Add("3");
@@ -3392,11 +3429,13 @@ public sealed class MainWindow : Window
             startInfo.ArgumentList.Add("--paths");
             startInfo.ArgumentList.Add(outputPath);
             startInfo.ArgumentList.Add("--output");
-            startInfo.ArgumentList.Add("%(title)s.%(ext)s");
+            startInfo.ArgumentList.Add(_downloadPlaylist
+                ? "%(playlist_index&{} - |)s%(title)s.%(ext)s"
+                : "%(title)s.%(ext)s");
             AddBilibiliBrowserHeaders(startInfo, url);
             AddBilibiliBrowserCookies(startInfo, url);
             AddCookiesFileArgument(startInfo, url);
-            startInfo.ArgumentList.Add(NormalizeMediaUrl(url));
+            startInfo.ArgumentList.Add(NormalizeMediaUrl(url, preservePlaylistParams: _downloadPlaylist));
 
             var code = await RunProcessAsync(startInfo, token, item);
             if (code == 0 && HasAnySubtitleNearLatestMedia(outputPath, outputFormat, _lastMediaOutputPath))
@@ -4176,18 +4215,23 @@ public sealed class MainWindow : Window
         return null;
     }
 
-    private static string NormalizeMediaUrl(string url)
+    private static string NormalizeMediaUrl(string url, bool preservePlaylistParams = false)
     {
         if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
         {
             return url;
         }
 
-        // Strip tracking params and playlist attachments so a shared watch URL
-        // (watch?v=ID&list=PL...) only targets the single video by default.
-        if (IsBilibiliVideoUri(uri) || IsYouTubeWatchUri(uri))
+        // Pure playlist pages always keep list= so optional full-playlist download works.
+        var isPurePlaylist = IsYouTubePlaylistPageUri(uri);
+
+        // Strip tracking params. Playlist params (list/index/...) are kept only when
+        // the user opts into full playlist download, or for pure /playlist URLs.
+        if (IsBilibiliVideoUri(uri) || IsYouTubeWatchUri(uri) || isPurePlaylist)
         {
-            var cleaned = RemoveTrackingQueryParameters(uri.Query);
+            var cleaned = RemoveTrackingQueryParameters(
+                uri.Query,
+                preservePlaylistParams: preservePlaylistParams || isPurePlaylist);
             var builder = new UriBuilder(uri)
             {
                 Query = cleaned
@@ -4208,13 +4252,54 @@ public sealed class MainWindow : Window
             return false;
         }
 
-        // Keep pure playlist URLs (/playlist?list=...) intact for explicit playlist use.
-        if (uri.AbsolutePath.StartsWith("/playlist", StringComparison.OrdinalIgnoreCase))
+        // Pure playlist pages are handled separately.
+        if (IsYouTubePlaylistPageUri(uri))
         {
             return false;
         }
 
         return true;
+    }
+
+    private static bool IsYouTubePlaylistPageUri(Uri uri) =>
+        (uri.Host.Contains("youtube.com", StringComparison.OrdinalIgnoreCase)
+         || uri.Host.Contains("youtube-nocookie.com", StringComparison.OrdinalIgnoreCase))
+        && uri.AbsolutePath.StartsWith("/playlist", StringComparison.OrdinalIgnoreCase);
+
+    private static bool LooksLikePlaylistUrl(string url)
+    {
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
+        {
+            return url.Contains("list=", StringComparison.OrdinalIgnoreCase)
+                || url.Contains("/playlist", StringComparison.OrdinalIgnoreCase);
+        }
+
+        if (IsYouTubePlaylistPageUri(uri))
+        {
+            return true;
+        }
+
+        var list = GetQueryParameter(uri, "list");
+        return !string.IsNullOrWhiteSpace(list);
+    }
+
+    private static bool UrlsLikelySameVideo(string? a, string? b)
+    {
+        if (string.IsNullOrWhiteSpace(a) || string.IsNullOrWhiteSpace(b))
+        {
+            return false;
+        }
+
+        if (string.Equals(a, b, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        // Compare after stripping playlist/tracking params.
+        return string.Equals(
+            NormalizeMediaUrl(a, preservePlaylistParams: false),
+            NormalizeMediaUrl(b, preservePlaylistParams: false),
+            StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool IsBilibiliVideoUrl(string url) =>
@@ -4224,22 +4309,31 @@ public sealed class MainWindow : Window
         uri.Host.EndsWith("bilibili.com", StringComparison.OrdinalIgnoreCase)
         && uri.AbsolutePath.StartsWith("/video/", StringComparison.OrdinalIgnoreCase);
 
-    private static string RemoveTrackingQueryParameters(string query)
+    private static string RemoveTrackingQueryParameters(string query, bool preservePlaylistParams = false)
     {
         if (string.IsNullOrWhiteSpace(query))
         {
             return "";
         }
 
-        // Bilibili tracking + YouTube playlist/session params that expand a single
-        // watch link into a full playlist download.
+        // Always drop tracking/share noise.
         var dropKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
             "spm_id_from", "from_spmid", "vd_source", "share_source",
             "share_medium", "share_plat", "share_session_id", "unique_k",
-            "list", "index", "start_radio", "pp", "playnext", "si", "feature",
-            "ab_channel", "t"
+            "si", "feature", "ab_channel", "t"
         };
+
+        // When not downloading full playlists, also drop list attachment params
+        // so watch?v=ID&list=PL... becomes a single-video URL.
+        if (!preservePlaylistParams)
+        {
+            dropKeys.Add("list");
+            dropKeys.Add("index");
+            dropKeys.Add("start_radio");
+            dropKeys.Add("pp");
+            dropKeys.Add("playnext");
+        }
 
         var kept = query.TrimStart('?')
             .Split('&', StringSplitOptions.RemoveEmptyEntries)
@@ -4461,6 +4555,7 @@ public sealed class MainWindow : Window
         _browseButton.IsEnabled = !busy;
         _qualityCombo.IsEnabled = !busy && _outputFormat == "MP4";
         _subtitleCheckBox.IsEnabled = !busy;
+        _playlistCheckBox.IsEnabled = !busy;
         _urlBox.IsReadOnly = busy;
         _outputBox.IsReadOnly = busy;
         _clearQueueButton.IsEnabled = !busy;
@@ -4509,7 +4604,8 @@ public sealed class MainWindow : Window
             _todayDownloads,
             DateOnly.FromDateTime(DateTime.Now),
             _includeSubtitles,
-            _cookiesFilePath);
+            _cookiesFilePath,
+            _downloadPlaylist);
     }
 
     private static string NormalizeMp4Quality(string? quality)
@@ -5022,6 +5118,7 @@ internal sealed class AppSettings
     public string OutputFormat { get; init; } = "MP4";
     public string Mp4Quality { get; init; } = "1080P";
     public bool? IncludeSubtitles { get; init; } = false;
+    public bool? DownloadPlaylist { get; init; } = false;
     public int TodayDownloadCount { get; init; }
     public DateOnly TodayDate { get; init; } = DateOnly.FromDateTime(DateTime.Now);
     public string? CookieFilePath { get; init; }
@@ -5047,6 +5144,7 @@ internal sealed class AppSettings
                         Mp4Quality = NormalizeQuality(settings.Mp4Quality),
                         // Missing property in older settings.json => default off.
                         IncludeSubtitles = settings.IncludeSubtitles ?? false,
+                        DownloadPlaylist = settings.DownloadPlaylist ?? false,
                         TodayDownloadCount = settings.TodayDate == today ? settings.TodayDownloadCount : 0,
                         TodayDate = today,
                         CookieFilePath = !string.IsNullOrEmpty(settings.CookieFilePath) && File.Exists(settings.CookieFilePath)
@@ -5072,7 +5170,8 @@ internal sealed class AppSettings
         int todayDownloadCount = 0,
         DateOnly? todayDate = null,
         bool includeSubtitles = false,
-        string? cookieFilePath = null)
+        string? cookieFilePath = null,
+        bool downloadPlaylist = false)
     {
         try
         {
@@ -5084,6 +5183,7 @@ internal sealed class AppSettings
                 OutputFormat = string.Equals(outputFormat, "MP3", StringComparison.OrdinalIgnoreCase) ? "MP3" : "MP4",
                 Mp4Quality = NormalizeQuality(mp4Quality),
                 IncludeSubtitles = includeSubtitles,
+                DownloadPlaylist = downloadPlaylist,
                 TodayDownloadCount = todayDownloadCount,
                 TodayDate = todayDate ?? DateOnly.FromDateTime(DateTime.Now),
                 CookieFilePath = cookieFilePath
