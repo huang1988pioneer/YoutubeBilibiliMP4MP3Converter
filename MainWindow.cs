@@ -55,11 +55,15 @@ public sealed class MainWindow : Window
     // in the system browser instead of allowing that failure to terminate the app.
     private static readonly bool EmbeddedPreviewEnabled = !RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
 
+    private const int MaxRecentSearches = 12;
+
     private readonly List<NavItem> _navItems = [];
     private readonly List<DownloadItemView> _downloadItems = [];
     private readonly List<SearchVideoResult> _searchResults = [];
+    private readonly List<RecentSearchEntry> _recentSearches = [];
     private readonly StackPanel _downloadListPanel;
     private readonly StackPanel _searchResultsPanel;
+    private readonly WrapPanel _searchHistoryPanel;
     private readonly StackPanel _mainHost;
     private readonly TextBox _urlBox;
     private readonly TextBox _outputBox;
@@ -73,7 +77,9 @@ public sealed class MainWindow : Window
     private readonly Button _browseButton;
     private readonly Button _clearQueueButton;
     private readonly Button _searchButton;
+    private readonly Button _clearSearchHistoryButton;
     private readonly TextBlock _searchStatusText;
+    private readonly TextBlock _searchHistoryEmptyText;
     private readonly Border _mp4Card;
     private readonly Border _mp3Card;
     private readonly Border _previewCard;
@@ -227,6 +233,42 @@ public sealed class MainWindow : Window
             TextWrapping = TextWrapping.Wrap
         };
         _searchResultsPanel = new StackPanel { Spacing = 10 };
+        _searchHistoryPanel = new WrapPanel
+        {
+            Orientation = Orientation.Horizontal,
+            ItemSpacing = 8,
+            LineSpacing = 8
+        };
+        _searchHistoryEmptyText = new TextBlock
+        {
+            Text = "\u5c1a\u7121\u641c\u5c0b\u7d00\u9304",
+            FontSize = 12,
+            Foreground = TextMuted,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        _clearSearchHistoryButton = CreateSoftButton("\u6e05\u9664\u7d00\u9304", 96);
+        _clearSearchHistoryButton.MinHeight = 32;
+        _clearSearchHistoryButton.Click += (_, _) =>
+        {
+            _recentSearches.Clear();
+            RebuildSearchHistoryPanel();
+            SaveSettingsIfPossible();
+            SetStatus("\u5df2\u6e05\u9664\u6700\u8fd1\u641c\u5c0b\u7d00\u9304");
+        };
+
+        // Restore recent searches from settings.
+        if (settings.RecentSearches is { Count: > 0 })
+        {
+            foreach (var entry in settings.RecentSearches
+                         .Where(e => !string.IsNullOrWhiteSpace(e.Query))
+                         .Take(MaxRecentSearches))
+            {
+                _recentSearches.Add(new RecentSearchEntry(
+                    entry.Query.Trim(),
+                    NormalizeSearchPlatform(entry.Platform),
+                    entry.SearchedAtUtc ?? DateTime.UtcNow));
+            }
+        }
 
         _qualityCombo = new ComboBox
         {
@@ -725,63 +767,59 @@ public sealed class MainWindow : Window
                 border.Background = Brushes.Transparent;
             }
         };
-        border.PointerPressed += (_, _) => Navigate(id);
+        // Defer navigation so we never rebuild the visual tree mid-pointer event.
+        border.PointerPressed += (_, _) => ScheduleNavigate(id);
 
         _navItems.Add(new NavItem(id, border));
         return border;
     }
 
+    private void ScheduleNavigate(string id)
+    {
+        Dispatcher.UIThread.Post(() => Navigate(id), DispatcherPriority.Background);
+    }
+
     private void Navigate(string id)
     {
-        _activeNav = id;
-        foreach (var item in _navItems)
+        try
         {
-            var active = item.Id == id;
-            item.Border.Background = active ? Blue : Brushes.Transparent;
-            if (item.Border.Child is StackPanel sp)
-            {
-                if (sp.Children.Count >= 1 && sp.Children[0] is Ellipse dot)
-                {
-                    dot.Fill = active ? Brushes.White : Blue;
-                }
+            UpdateNavHighlight(id);
 
-                if (sp.Children.Count >= 2 && sp.Children[1] is TextBlock label)
-                {
-                    label.Foreground = active ? Brushes.White : TextPrimary;
-                    label.FontWeight = active ? FontWeight.SemiBold : FontWeight.Normal;
-                }
+            switch (id)
+            {
+                case "home":
+                case "parse":
+                    ShowHomePage();
+                    break;
+                case "search":
+                    ShowSearchPage();
+                    break;
+                case "downloading":
+                    ShowQueuePage(onlyActive: true);
+                    break;
+                case "done":
+                    ShowQueuePage(onlyDone: true);
+                    break;
+                case "audio":
+                    SetOutputFormat("MP3");
+                    ShowHomePage();
+                    SetStatus("\u5df2\u5207\u63db\u5230\u97f3\u6a02\u63d0\u53d6\uff08MP3\uff09");
+                    break;
+                case "files":
+                    ShowFilesPage();
+                    break;
+                case "history":
+                    ShowQueuePage();
+                    break;
+                case "fav":
+                    ShowPlaceholder("\u6211\u7684\u6700\u611b", "\u4e4b\u5f8c\u53ef\u6536\u85cf\u5e38\u7528\u5f71\u7247\u8207\u64ad\u653e\u6e05\u55ae\u3002");
+                    break;
             }
         }
-
-        switch (id)
+        catch (Exception ex)
         {
-            case "home":
-            case "parse":
-                ShowHomePage();
-                break;
-            case "search":
-                ShowSearchPage();
-                break;
-            case "downloading":
-                ShowQueuePage(onlyActive: true);
-                break;
-            case "done":
-                ShowQueuePage(onlyDone: true);
-                break;
-            case "audio":
-                SetOutputFormat("MP3");
-                ShowHomePage();
-                SetStatus("\u5df2\u5207\u63db\u5230\u97f3\u6a02\u63d0\u53d6\uff08MP3\uff09");
-                break;
-            case "files":
-                ShowFilesPage();
-                break;
-            case "history":
-                ShowQueuePage();
-                break;
-            case "fav":
-                ShowPlaceholder("\u6211\u7684\u6700\u611b", "\u4e4b\u5f8c\u53ef\u6536\u85cf\u5e38\u7528\u5f71\u7247\u8207\u64ad\u653e\u6e05\u55ae\u3002");
-                break;
+            AppendLog($"\u5c0e\u89bd\u5931\u6557 ({id}): {ex}");
+            SetStatus("\u5207\u63db\u9801\u9762\u5931\u6557\uff0c\u8acb\u91cd\u8a66");
         }
     }
 
@@ -790,73 +828,74 @@ public sealed class MainWindow : Window
         // Shared controls are reused across rebuilds. Avalonia forbids adding a control
         // that still has a visual parent, so detach them before clearing the host.
         // NativeWebView needs an explicit reparent scope while its host moves.
-        using var reparent = _previewWebView.BeginReparenting();
-        DetachSharedControls();
-        _mainHost.Children.Clear();
-        _mainHost.Children.Add(BuildHeader());
-        _mainHost.Children.Add(BuildUrlCard());
-        _mainHost.Children.Add(BuildOptionsAndPreviewRow());
-        _mainHost.Children.Add(BuildQueueAndUtilsRow());
-        _mainHost.Children.Add(BuildLogCard());
-        RebuildDownloadList();
+        RebuildMainHost(() =>
+        {
+            _mainHost.Children.Add(BuildHeader());
+            _mainHost.Children.Add(BuildUrlCard());
+            _mainHost.Children.Add(BuildOptionsAndPreviewRow());
+            _mainHost.Children.Add(BuildQueueAndUtilsRow());
+            _mainHost.Children.Add(BuildLogCard());
+            RebuildDownloadList();
+        });
     }
 
     private void ShowQueuePage(bool onlyActive = false, bool onlyDone = false)
     {
         // Pause embedded media when leaving the home/preview surface.
         StopEmbeddedPreview(clearStatus: false);
-        using var reparent = _previewWebView.BeginReparenting();
-        DetachSharedControls();
-        _mainHost.Children.Clear();
-        var title = onlyActive
-            ? "\u4e0b\u8f09\u4e2d"
-            : onlyDone
-                ? "\u5df2\u5b8c\u6210"
-                : "\u6b77\u53f2\u8a18\u9304";
-        var subtitle = onlyActive
-            ? "\u76ee\u524d\u9032\u884c\u4e2d\u7684\u8f49\u63db\u4efb\u52d9"
-            : onlyDone
-                ? "\u5df2\u6210\u529f\u5b8c\u6210\u7684\u6a94\u6848"
-                : "\u6240\u6709\u8f49\u63db\u7d00\u9304";
-        _mainHost.Children.Add(SectionTitle(title, subtitle));
-
-        var filtered = _downloadItems.Where(item =>
+        RebuildMainHost(() =>
         {
-            if (onlyActive)
+            var title = onlyActive
+                ? "\u4e0b\u8f09\u4e2d"
+                : onlyDone
+                    ? "\u5df2\u5b8c\u6210"
+                    : "\u6b77\u53f2\u8a18\u9304";
+            var subtitle = onlyActive
+                ? "\u76ee\u524d\u9032\u884c\u4e2d\u7684\u8f49\u63db\u4efb\u52d9"
+                : onlyDone
+                    ? "\u5df2\u6210\u529f\u5b8c\u6210\u7684\u6a94\u6848"
+                    : "\u6240\u6709\u8f49\u63db\u7d00\u9304";
+            _mainHost.Children.Add(SectionTitle(title, subtitle));
+
+            var filtered = _downloadItems.Where(item =>
             {
-                return item.State is DownloadState.Queued or DownloadState.Running or DownloadState.Paused;
+                if (onlyActive)
+                {
+                    return item.State is DownloadState.Queued or DownloadState.Running or DownloadState.Paused;
+                }
+
+                if (onlyDone)
+                {
+                    return item.State == DownloadState.Completed;
+                }
+
+                return true;
+            }).ToList();
+
+            if (filtered.Count == 0)
+            {
+                _mainHost.Children.Add(EmptyState(
+                    "\u76ee\u524d\u6c92\u6709\u9805\u76ee",
+                    "\u5f9e\u9996\u9801\u8cbc\u4e0a\u7db2\u5740\u4e26\u958b\u59cb\u8f49\u63db\u3002"));
+                return;
             }
 
-            if (onlyDone)
+            var list = new StackPanel { Spacing = 10 };
+            foreach (var item in filtered)
             {
-                return item.State == DownloadState.Completed;
+                DetachFromParent(item.Root);
+                list.Children.Add(item.Root);
             }
 
-            return true;
-        }).ToList();
-
-        if (filtered.Count == 0)
-        {
-            _mainHost.Children.Add(EmptyState("\u76ee\u524d\u6c92\u6709\u9805\u76ee", "\u5f9e\u9996\u9801\u8cbc\u4e0a\u7db2\u5740\u4e26\u958b\u59cb\u8f49\u63db\u3002"));
-            return;
-        }
-
-        var list = new StackPanel { Spacing = 10 };
-        foreach (var item in filtered)
-        {
-            DetachFromParent(item.Root);
-            list.Children.Add(item.Root);
-        }
-
-        _mainHost.Children.Add(Card(list));
+            _mainHost.Children.Add(Card(list));
+        });
     }
 
     private void ShowFilesPage()
     {
         StopEmbeddedPreview(clearStatus: false);
-        using var reparent = _previewWebView.BeginReparenting();
-        DetachSharedControls();
-        _mainHost.Children.Clear();
+        RebuildMainHost(() =>
+        {
         _mainHost.Children.Add(SectionTitle("\u6a94\u6848\u7ba1\u7406", "\u958b\u555f\u8f38\u51fa\u8cc7\u6599\u593e\uff0c\u7ba1\u7406\u5df2\u8f49\u63db\u7684\u6a94\u6848"));
         var path = _outputBox.Text?.Trim() ?? "";
         var panel = new StackPanel { Spacing = 12 };
@@ -927,109 +966,129 @@ public sealed class MainWindow : Window
         }
 
         _mainHost.Children.Add(Card(panel));
+        });
     }
 
     private void ShowSearchPage()
     {
         StopEmbeddedPreview(clearStatus: false);
-        using var reparent = _previewWebView.BeginReparenting();
-        DetachSharedControls();
-        _mainHost.Children.Clear();
-
-        _mainHost.Children.Add(SectionTitle(
-            "\u641c\u5c0b\u5f71\u7247",
-            "\u641c\u5c0b YouTube \u6216 Bilibili\uff0c\u9ede\u9078\u7d50\u679c\u5373\u53ef\u89e3\u6790\u6216\u8f49\u63db"));
-
-        var form = new StackPanel { Spacing = 12 };
-
-        form.Children.Add(new TextBlock
+        RebuildMainHost(() =>
         {
-            Text = "\u95dc\u9375\u5b57",
-            FontSize = 13,
-            FontWeight = FontWeight.SemiBold,
-            Foreground = TextPrimary
-        });
+            _mainHost.Children.Add(SectionTitle(
+                "\u641c\u5c0b\u5f71\u7247",
+                "\u641c\u5c0b YouTube \u6216 Bilibili\uff0c\u9ede\u9078\u7d50\u679c\u5373\u53ef\u89e3\u6790\u6216\u8f49\u63db"));
 
-        var searchRow = new Grid
-        {
-            ColumnDefinitions = new ColumnDefinitions("*,Auto"),
-            ColumnSpacing = 10
-        };
-        searchRow.Children.Add(_searchBox);
-        Grid.SetColumn(_searchButton, 1);
-        searchRow.Children.Add(_searchButton);
-        form.Children.Add(searchRow);
+            var form = new StackPanel { Spacing = 12 };
 
-        var filterRow = new Grid
-        {
-            ColumnDefinitions = new ColumnDefinitions("Auto,Auto,Auto,Auto,*"),
-            ColumnSpacing = 10
-        };
-        filterRow.Children.Add(new TextBlock
-        {
-            Text = "\u5e73\u53f0",
-            FontSize = 13,
-            Foreground = TextSecondary,
-            VerticalAlignment = VerticalAlignment.Center
-        });
-        Grid.SetColumn(_searchPlatformCombo, 1);
-        filterRow.Children.Add(_searchPlatformCombo);
-        var countLabel = new TextBlock
-        {
-            Text = "\u6bcf\u5e73\u53f0\u7d50\u679c\u6578",
-            FontSize = 13,
-            Foreground = TextSecondary,
-            VerticalAlignment = VerticalAlignment.Center,
-            Margin = new Thickness(8, 0, 0, 0)
-        };
-        Grid.SetColumn(countLabel, 2);
-        filterRow.Children.Add(countLabel);
-        Grid.SetColumn(_searchCountCombo, 3);
-        filterRow.Children.Add(_searchCountCombo);
-        form.Children.Add(filterRow);
-
-        form.Children.Add(_searchStatusText);
-
-        var chips = new StackPanel
-        {
-            Orientation = Orientation.Horizontal,
-            Spacing = 8
-        };
-        chips.Children.Add(PlatformChip("YouTube", RedYouTube, Brush.Parse("#FFECEC")));
-        chips.Children.Add(PlatformChip("bilibili", PinkBili, PinkBiliSoft));
-        chips.Children.Add(new TextBlock
-        {
-            Text = "YouTube \u7d93 yt-dlp\uff1bBilibili \u7d93\u5b98\u65b9\u641c\u5c0b API",
-            FontSize = 11,
-            Foreground = TextMuted,
-            VerticalAlignment = VerticalAlignment.Center,
-            Margin = new Thickness(6, 0, 0, 0)
-        });
-        form.Children.Add(chips);
-
-        _mainHost.Children.Add(Card(form));
-
-        var resultsBody = new StackPanel { Spacing = 10 };
-        resultsBody.Children.Add(new TextBlock
-        {
-            Text = "\u641c\u5c0b\u7d50\u679c",
-            FontSize = 14,
-            FontWeight = FontWeight.SemiBold,
-            Foreground = TextPrimary
-        });
-        resultsBody.Children.Add(_searchResultsPanel);
-        if (_searchResultsPanel.Children.Count == 0)
-        {
-            _searchResultsPanel.Children.Add(new TextBlock
+            form.Children.Add(new TextBlock
             {
-                Text = "\u5c1a\u7121\u7d50\u679c\u3002\u8f38\u5165\u95dc\u9375\u5b57\u5f8c\u6309\u300c\u641c\u5c0b\u5f71\u7247\u300d\u3002",
+                Text = "\u95dc\u9375\u5b57",
                 FontSize = 13,
-                Foreground = TextMuted,
-                Margin = new Thickness(0, 4, 0, 0)
+                FontWeight = FontWeight.SemiBold,
+                Foreground = TextPrimary
             });
-        }
 
-        _mainHost.Children.Add(Card(resultsBody));
+            var searchRow = new Grid
+            {
+                ColumnDefinitions = new ColumnDefinitions("*,Auto"),
+                ColumnSpacing = 10
+            };
+            searchRow.Children.Add(_searchBox);
+            Grid.SetColumn(_searchButton, 1);
+            searchRow.Children.Add(_searchButton);
+            form.Children.Add(searchRow);
+
+            var filterRow = new Grid
+            {
+                ColumnDefinitions = new ColumnDefinitions("Auto,Auto,Auto,Auto,*"),
+                ColumnSpacing = 10
+            };
+            filterRow.Children.Add(new TextBlock
+            {
+                Text = "\u5e73\u53f0",
+                FontSize = 13,
+                Foreground = TextSecondary,
+                VerticalAlignment = VerticalAlignment.Center
+            });
+            Grid.SetColumn(_searchPlatformCombo, 1);
+            filterRow.Children.Add(_searchPlatformCombo);
+            var countLabel = new TextBlock
+            {
+                Text = "\u6bcf\u5e73\u53f0\u7d50\u679c\u6578",
+                FontSize = 13,
+                Foreground = TextSecondary,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(8, 0, 0, 0)
+            };
+            Grid.SetColumn(countLabel, 2);
+            filterRow.Children.Add(countLabel);
+            Grid.SetColumn(_searchCountCombo, 3);
+            filterRow.Children.Add(_searchCountCombo);
+            form.Children.Add(filterRow);
+
+            form.Children.Add(_searchStatusText);
+
+            var chips = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Spacing = 8
+            };
+            chips.Children.Add(PlatformChip("YouTube", RedYouTube, Brush.Parse("#FFECEC")));
+            chips.Children.Add(PlatformChip("bilibili", PinkBili, PinkBiliSoft));
+            chips.Children.Add(new TextBlock
+            {
+                Text = "YouTube \u7d93 yt-dlp\uff1bBilibili \u7d93\u5b98\u65b9\u641c\u5c0b API",
+                FontSize = 11,
+                Foreground = TextMuted,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(6, 0, 0, 0)
+            });
+            form.Children.Add(chips);
+
+            // Recent search history
+            var historyHeader = new Grid
+            {
+                ColumnDefinitions = new ColumnDefinitions("*,Auto"),
+                Margin = new Thickness(0, 6, 0, 0)
+            };
+            historyHeader.Children.Add(new TextBlock
+            {
+                Text = "\u6700\u8fd1\u641c\u5c0b\u7d00\u9304",
+                FontSize = 13,
+                FontWeight = FontWeight.SemiBold,
+                Foreground = TextPrimary,
+                VerticalAlignment = VerticalAlignment.Center
+            });
+            Grid.SetColumn(_clearSearchHistoryButton, 1);
+            historyHeader.Children.Add(_clearSearchHistoryButton);
+            form.Children.Add(historyHeader);
+            form.Children.Add(_searchHistoryPanel);
+            RebuildSearchHistoryPanel();
+
+            _mainHost.Children.Add(Card(form));
+
+            var resultsBody = new StackPanel { Spacing = 10 };
+            resultsBody.Children.Add(new TextBlock
+            {
+                Text = "\u641c\u5c0b\u7d50\u679c",
+                FontSize = 14,
+                FontWeight = FontWeight.SemiBold,
+                Foreground = TextPrimary
+            });
+            resultsBody.Children.Add(_searchResultsPanel);
+            if (_searchResultsPanel.Children.Count == 0)
+            {
+                _searchResultsPanel.Children.Add(new TextBlock
+                {
+                    Text = "\u5c1a\u7121\u7d50\u679c\u3002\u8f38\u5165\u95dc\u9375\u5b57\u5f8c\u6309\u300c\u641c\u5c0b\u5f71\u7247\u300d\u3002",
+                    FontSize = 13,
+                    Foreground = TextMuted,
+                    Margin = new Thickness(0, 4, 0, 0)
+                });
+            }
+
+            _mainHost.Children.Add(Card(resultsBody));
+        });
     }
 
     private void OpenOutputFolder(string? path)
@@ -1189,11 +1248,43 @@ public sealed class MainWindow : Window
     private void ShowPlaceholder(string title, string message)
     {
         StopEmbeddedPreview(clearStatus: false);
-        using var reparent = _previewWebView.BeginReparenting();
+        RebuildMainHost(() =>
+        {
+            _mainHost.Children.Add(SectionTitle(title, message));
+            _mainHost.Children.Add(EmptyState(title, message));
+        });
+    }
+
+    /// <summary>
+    /// Clears and rebuilds the main content host. On platforms where embedded
+    /// WebView is enabled, reparenting is wrapped so the native view survives
+    /// host moves. On Windows the WebView is intentionally left alone — accessing
+    /// it during page switches can terminate the process.
+    /// </summary>
+    private void RebuildMainHost(Action build)
+    {
+        if (EmbeddedPreviewEnabled)
+        {
+            try
+            {
+                using var reparent = _previewWebView.BeginReparenting();
+                DetachSharedControls();
+                _mainHost.Children.Clear();
+                build();
+                return;
+            }
+            catch (Exception ex)
+            {
+                AppendLog($"\u91cd\u5efa\u4e3b\u756b\u9762\u5931\u6557\uff08WebView reparent\uff09: {ex.Message}");
+            }
+        }
+
         DetachSharedControls();
         _mainHost.Children.Clear();
-        _mainHost.Children.Add(SectionTitle(title, message));
-        _mainHost.Children.Add(EmptyState(title, message));
+        // Detach again after Clear — intermediate parents may still hold shared
+        // controls if Clear only dropped the outer cards.
+        DetachSharedControls();
+        build();
     }
 
     /// <summary>
@@ -1201,28 +1292,44 @@ public sealed class MainWindow : Window
     /// </summary>
     private static void DetachFromParent(Control? control)
     {
-        if (control?.Parent is null)
+        if (control is null)
         {
             return;
         }
 
-        switch (control.Parent)
+        // Walk up until unparented (handles odd intermediate hosts).
+        for (var i = 0; i < 4 && control.Parent is not null; i++)
         {
-            case Panel panel:
-                panel.Children.Remove(control);
-                break;
-            case Decorator decorator:
-                if (ReferenceEquals(decorator.Child, control))
-                {
-                    decorator.Child = null;
-                }
-                break;
-            case ContentControl contentControl:
-                if (ReferenceEquals(contentControl.Content, control))
-                {
-                    contentControl.Content = null;
-                }
-                break;
+            switch (control.Parent)
+            {
+                case Panel panel:
+                    panel.Children.Remove(control);
+                    break;
+                case Decorator decorator:
+                    if (ReferenceEquals(decorator.Child, control))
+                    {
+                        decorator.Child = null;
+                    }
+                    else
+                    {
+                        return;
+                    }
+
+                    break;
+                case ContentControl contentControl:
+                    if (ReferenceEquals(contentControl.Content, control))
+                    {
+                        contentControl.Content = null;
+                    }
+                    else
+                    {
+                        return;
+                    }
+
+                    break;
+                default:
+                    return;
+            }
         }
     }
 
@@ -1232,6 +1339,8 @@ public sealed class MainWindow : Window
     /// </summary>
     private void DetachSharedControls()
     {
+        // Every field-backed control reused across pages MUST be listed here.
+        // Missing one causes: "The control X already has a visual parent".
         DetachFromParent(_urlBox);
         DetachFromParent(_pasteButton);
         DetachFromParent(_parseButton);
@@ -1240,6 +1349,9 @@ public sealed class MainWindow : Window
         DetachFromParent(_qualityCombo);
         DetachFromParent(_subtitleCheckBox);
         DetachFromParent(_playlistCheckBox);
+        DetachFromParent(_cookiesPathLabel);
+        DetachFromParent(_cookiesBrowseButton);
+        DetachFromParent(_cookiesClearButton);
         DetachFromParent(_outputBox);
         DetachFromParent(_browseButton);
         DetachFromParent(_convertButton);
@@ -1255,6 +1367,9 @@ public sealed class MainWindow : Window
         DetachFromParent(_searchCountCombo);
         DetachFromParent(_searchStatusText);
         DetachFromParent(_searchResultsPanel);
+        DetachFromParent(_searchHistoryPanel);
+        DetachFromParent(_clearSearchHistoryButton);
+        DetachFromParent(_searchHistoryEmptyText);
 
         foreach (var item in _downloadItems)
         {
@@ -2056,6 +2171,9 @@ public sealed class MainWindow : Window
         SetStatus($"\u6b63\u5728\u641c\u5c0b\uff1a{query}");
         AppendLog($"\u641c\u5c0b [{_searchPlatform}]: {query}");
 
+        // Record the query as soon as the user starts a search.
+        RememberRecentSearch(query, _searchPlatform);
+
         _searchResults.Clear();
         _searchResultsPanel.Children.Clear();
         _searchResultsPanel.Children.Add(new TextBlock
@@ -2163,6 +2281,157 @@ public sealed class MainWindow : Window
         }
     }
 
+    private void RememberRecentSearch(string query, string platform)
+    {
+        query = query.Trim();
+        if (string.IsNullOrWhiteSpace(query))
+        {
+            return;
+        }
+
+        platform = NormalizeSearchPlatform(platform);
+        _recentSearches.RemoveAll(e =>
+            string.Equals(e.Query, query, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(e.Platform, platform, StringComparison.OrdinalIgnoreCase));
+        _recentSearches.Insert(0, new RecentSearchEntry(query, platform, DateTime.UtcNow));
+        while (_recentSearches.Count > MaxRecentSearches)
+        {
+            _recentSearches.RemoveAt(_recentSearches.Count - 1);
+        }
+
+        RebuildSearchHistoryPanel();
+        SaveSettingsIfPossible();
+    }
+
+    private void RebuildSearchHistoryPanel()
+    {
+        _searchHistoryPanel.Children.Clear();
+        DetachFromParent(_searchHistoryEmptyText);
+        _clearSearchHistoryButton.IsEnabled = _recentSearches.Count > 0;
+
+        if (_recentSearches.Count == 0)
+        {
+            _searchHistoryPanel.Children.Add(_searchHistoryEmptyText);
+            return;
+        }
+
+        foreach (var entry in _recentSearches)
+        {
+            _searchHistoryPanel.Children.Add(BuildRecentSearchChip(entry));
+        }
+    }
+
+    private Control BuildRecentSearchChip(RecentSearchEntry entry)
+    {
+        var platformLabel = entry.Platform switch
+        {
+            "youtube" => "YT",
+            "bilibili" => "Bili",
+            _ => "YT+Bili"
+        };
+        var accent = entry.Platform switch
+        {
+            "youtube" => RedYouTube,
+            "bilibili" => PinkBili,
+            _ => Blue
+        };
+        var soft = entry.Platform switch
+        {
+            "youtube" => Brush.Parse("#FFECEC"),
+            "bilibili" => PinkBiliSoft,
+            _ => BlueSoft
+        };
+
+        var chip = new Border
+        {
+            Background = soft,
+            BorderBrush = BorderSoft,
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(16),
+            Padding = new Thickness(10, 6),
+            Cursor = new Cursor(StandardCursorType.Hand),
+            Margin = new Thickness(0, 0, 0, 0)
+        };
+
+        var row = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 6
+        };
+        row.Children.Add(new TextBlock
+        {
+            Text = platformLabel,
+            FontSize = 11,
+            FontWeight = FontWeight.SemiBold,
+            Foreground = accent,
+            VerticalAlignment = VerticalAlignment.Center
+        });
+        row.Children.Add(new TextBlock
+        {
+            Text = entry.Query,
+            FontSize = 12,
+            Foreground = TextPrimary,
+            VerticalAlignment = VerticalAlignment.Center,
+            MaxWidth = 180,
+            TextTrimming = TextTrimming.CharacterEllipsis
+        });
+        chip.Child = row;
+
+        var snap = entry;
+        chip.PointerPressed += async (_, e) =>
+        {
+            if (!e.GetCurrentPoint(chip).Properties.IsLeftButtonPressed)
+            {
+                return;
+            }
+
+            e.Handled = true;
+            _searchBox.Text = snap.Query;
+            ApplySearchPlatformToCombo(snap.Platform);
+            SetStatus($"\u5df2\u9078\u7528\u641c\u5c0b\u7d00\u9304\uff1a{snap.Query}");
+            await SearchVideosCoreAsync();
+        };
+
+        // Right-click / secondary: remove single entry.
+        chip.PointerReleased += (_, e) =>
+        {
+            if (e.InitialPressMouseButton != MouseButton.Right)
+            {
+                return;
+            }
+
+            e.Handled = true;
+            _recentSearches.RemoveAll(x =>
+                string.Equals(x.Query, snap.Query, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(x.Platform, snap.Platform, StringComparison.OrdinalIgnoreCase));
+            RebuildSearchHistoryPanel();
+            SaveSettingsIfPossible();
+            SetStatus($"\u5df2\u79fb\u9664\u7d00\u9304\uff1a{snap.Query}");
+        };
+
+        ToolTip.SetTip(chip, $"{entry.Query}\n\u5e73\u53f0: {platformLabel}\n\u5de6\u9375\u91cd\u641c\uff0c\u53f3\u9375\u79fb\u9664");
+        return chip;
+    }
+
+    private void ApplySearchPlatformToCombo(string platform)
+    {
+        _searchPlatform = NormalizeSearchPlatform(platform);
+        _searchPlatformCombo.SelectedIndex = _searchPlatform switch
+        {
+            "youtube" => 1,
+            "bilibili" => 2,
+            _ => 0
+        };
+    }
+
+    private static string NormalizeSearchPlatform(string? platform) =>
+        platform?.Trim().ToLowerInvariant() switch
+        {
+            "youtube" or "yt" => "youtube",
+            "bilibili" or "bili" => "bilibili",
+            _ => "both"
+        };
+
     private Control BuildSearchResultCard(SearchVideoResult item)
     {
         var isYouTube = item.Platform.Equals("YouTube", StringComparison.OrdinalIgnoreCase);
@@ -2265,14 +2534,18 @@ public sealed class MainWindow : Window
 
         var useBtn = CreateSoftButton("\u4f7f\u7528\u7db2\u5740", 96);
         useBtn.MinHeight = 34;
-        useBtn.Click += (_, _) => UseSearchResult(item, parse: false, convert: false);
+        useBtn.Click += (_, e) =>
+        {
+            e.Handled = true;
+            ScheduleSearchResultAction(item, parse: false, convert: false);
+        };
 
         var parseBtn = CreatePrimaryButton("\u89e3\u6790\u9810\u89bd", 100);
         parseBtn.MinHeight = 34;
-        parseBtn.Click += async (_, _) =>
+        parseBtn.Click += (_, e) =>
         {
-            UseSearchResult(item, parse: false, convert: false);
-            await ParseUrlCoreAsync();
+            e.Handled = true;
+            ScheduleSearchResultAction(item, parse: true, convert: false);
         };
 
         var convertBtn = new Button
@@ -2288,15 +2561,19 @@ public sealed class MainWindow : Window
             Cursor = new Cursor(StandardCursorType.Hand),
             Padding = new Thickness(12, 6)
         };
-        convertBtn.Click += async (_, _) =>
+        convertBtn.Click += (_, e) =>
         {
-            UseSearchResult(item, parse: false, convert: false);
-            await ConvertSelectedUrlsAsync();
+            e.Handled = true;
+            ScheduleSearchResultAction(item, parse: false, convert: true);
         };
 
         var openBtn = CreateSoftButton("\u539f\u9801", 72);
         openBtn.MinHeight = 34;
-        openBtn.Click += (_, _) => OpenOriginalPage(item.Url);
+        openBtn.Click += (_, e) =>
+        {
+            e.Handled = true;
+            OpenOriginalPage(item.Url);
+        };
 
         actions.Children.Add(useBtn);
         actions.Children.Add(parseBtn);
@@ -2308,20 +2585,128 @@ public sealed class MainWindow : Window
         grid.Children.Add(body);
         root.Child = grid;
 
-        root.PointerPressed += async (_, e) =>
+        // Click the card body (not a button) => fill URL and go home for convert/parse.
+        root.PointerReleased += (_, e) =>
         {
-            // Double-click card to use + parse.
-            if (e.ClickCount >= 2 && e.GetCurrentPoint(root).Properties.IsLeftButtonPressed)
+            if (e.InitialPressMouseButton == MouseButton.Left
+                && e.Source is Control source
+                && !IsDescendantOfButton(source, root))
             {
-                UseSearchResult(item, parse: false, convert: false);
-                await ParseUrlCoreAsync();
+                e.Handled = true;
+                ScheduleSearchResultAction(item, parse: false, convert: false);
             }
         };
 
         return root;
     }
 
-    private void UseSearchResult(SearchVideoResult item, bool parse, bool convert)
+    private static bool IsDescendantOfButton(Control source, Control root)
+    {
+        Control? current = source;
+        while (current is not null && !ReferenceEquals(current, root))
+        {
+            if (current is Button)
+            {
+                return true;
+            }
+
+            current = current.Parent as Control;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Defer page navigation until after the current input event finishes.
+    /// Navigating (and tearing down the result card) inside the click handler
+    /// can crash Avalonia / native controls.
+    /// </summary>
+    private void ScheduleSearchResultAction(SearchVideoResult item, bool parse, bool convert)
+    {
+        var snapshot = item;
+        // Input priority runs soon after the pointer/click event completes,
+        // without waiting for idle Background work that may never flush while UI is busy.
+        Dispatcher.UIThread.Post(
+            () => _ = ApplySearchResultActionAsync(snapshot, parse, convert),
+            DispatcherPriority.Input);
+    }
+
+    private async Task ApplySearchResultActionAsync(SearchVideoResult item, bool parse, bool convert)
+    {
+        try
+        {
+            ApplySearchSelection(item);
+
+            // Always rebuild home explicitly — do not rely only on sidebar state.
+            UpdateNavHighlight("home");
+            ShowHomePage();
+            ApplySeededPreviewUi(item);
+            SetStatus($"\u5df2\u9078\u7528\uff1a{item.Title}");
+            AppendLog($"\u641c\u5c0b\u9078\u7528 [{item.Platform}]: {item.Url}");
+            AppendLog($"\u7db2\u5740: {item.Url}");
+
+            // Yield one frame so home layout is attached before long-running work.
+            await Task.Yield();
+            await Dispatcher.UIThread.InvokeAsync(() => { }, DispatcherPriority.Render);
+
+            // Confirm URL landed in the home input.
+            if (string.IsNullOrWhiteSpace(_urlBox.Text))
+            {
+                _urlBox.Text = item.Url;
+            }
+
+            if (parse)
+            {
+                await ParseUrlCoreAsync();
+            }
+
+            if (convert)
+            {
+                await ConvertOrCancelCoreAsync();
+            }
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"\u641c\u5c0b\u9078\u7528\u5931\u6557: {ex}");
+            SetStatus("\u64cd\u4f5c\u5931\u6557\uff0c\u8acb\u91cd\u8a66");
+            try
+            {
+                // Last-resort: still put the URL in the box even if navigation failed.
+                _urlBox.Text = item.Url;
+                UpdateNavHighlight("home");
+                ShowHomePage();
+            }
+            catch
+            {
+                // ignore secondary failures
+            }
+        }
+    }
+
+    private void UpdateNavHighlight(string id)
+    {
+        _activeNav = id;
+        foreach (var item in _navItems)
+        {
+            var active = item.Id == id;
+            item.Border.Background = active ? Blue : Brushes.Transparent;
+            if (item.Border.Child is StackPanel sp)
+            {
+                if (sp.Children.Count >= 1 && sp.Children[0] is Ellipse dot)
+                {
+                    dot.Fill = active ? Brushes.White : Blue;
+                }
+
+                if (sp.Children.Count >= 2 && sp.Children[1] is TextBlock label)
+                {
+                    label.Foreground = active ? Brushes.White : TextPrimary;
+                    label.FontWeight = active ? FontWeight.SemiBold : FontWeight.Normal;
+                }
+            }
+        }
+    }
+
+    private void ApplySearchSelection(SearchVideoResult item)
     {
         _urlBox.Text = item.Url;
         // Seed lightweight metadata so the download queue shows a real title
@@ -2338,24 +2723,27 @@ public sealed class MainWindow : Window
             VideoId: item.VideoId,
             ExtractorKey: item.Platform.Equals("Bilibili", StringComparison.OrdinalIgnoreCase) ? "BiliBili" : "Youtube",
             ChannelName: item.Uploader);
-        Navigate("home");
-        SetStatus($"\u5df2\u9078\u7528\uff1a{item.Title}");
-        AppendLog($"\u641c\u5c0b\u9078\u7528 [{item.Platform}]: {item.Url}");
-        if (parse)
-        {
-            _ = ParseUrlCoreAsync();
-        }
-
-        if (convert)
-        {
-            _ = ConvertSelectedUrlsAsync();
-        }
     }
 
-    private async Task ConvertSelectedUrlsAsync()
+    private void ApplySeededPreviewUi(SearchVideoResult item)
     {
-        // Reuse the main convert entry point so queue / yt-dlp options stay consistent.
-        await ConvertOrCancelCoreAsync();
+        try
+        {
+            _previewTitle.Text = item.Title;
+            _previewDuration.Text = $"\u6642\u9577:  {FormatDuration(item.DurationSeconds)}";
+            _previewViews.Text = $"\u6b21\u6578:  {FormatCount(item.ViewCount)}";
+            _previewChannelFollowers.Text = $"\u983b\u9053:  {item.Uploader ?? "-"}";
+            _previewDate.Text = "\u65e5\u671f:  -";
+            _previewStatus.Text = "\u5df2\u5f9e\u641c\u5c0b\u9078\u7528\uff0c\u53ef\u89e3\u6790\u6216\u8f49\u63db";
+            _previewStatus.Foreground = Blue;
+            _previewPlayButton.IsEnabled = true;
+            _previewBrowserButton.IsEnabled = true;
+            _ = LoadPreviewThumbnailAsync(item.ThumbnailUrl);
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"\u9810\u89bd\u8cc7\u8a0a\u66f4\u65b0\u5931\u6557: {ex.Message}");
+        }
     }
 
     private async Task LoadSearchThumbnailAsync(
@@ -2956,10 +3344,16 @@ public sealed class MainWindow : Window
             }
 
             _ = LoadPreviewThumbnailAsync(info.ThumbnailUrl);
-            if (!info.IsChannel)
+            // Auto stream preview only where embedded WebView is safe (non-Windows).
+            if (!info.IsChannel && EmbeddedPreviewEnabled)
             {
                 // Auto-load a local HTML5 stream preview (avoids YouTube embed 152/153 blocks).
                 _ = StartEmbeddedPreviewAsync(autoplay: false);
+            }
+            else if (!info.IsChannel)
+            {
+                _previewStatus.Text = "\u89e3\u6790\u6210\u529f \u00b7 \u8acb\u7528\u300c\u539f\u9801\u300d\u64ad\u653e";
+                _previewStatus.Foreground = Green;
             }
         }
         catch (Exception ex)
@@ -2969,7 +3363,14 @@ public sealed class MainWindow : Window
         }
         finally
         {
-            _parseButton.IsEnabled = true;
+            try
+            {
+                _parseButton.IsEnabled = true;
+            }
+            catch
+            {
+                // ignore if control was torn down mid-operation
+            }
         }
     }
 
@@ -3312,8 +3713,8 @@ public sealed class MainWindow : Window
 
         if (!EmbeddedPreviewEnabled)
         {
+            // Never touch NativeWebView on Windows — property access can crash the process.
             _embeddedPreviewActive = false;
-            _previewWebView.IsVisible = false;
             _previewOverlay.IsVisible = true;
             _previewStopButton.IsEnabled = false;
             _previewStatus.Text = "Windows \u5df2\u6539\u7528\u7a69\u5b9a\u7684\u539f\u9801\u64ad\u653e";
@@ -3336,7 +3737,7 @@ public sealed class MainWindow : Window
 
         try
         {
-            _previewWebView.IsVisible = true;
+            SafeSetPreviewWebViewVisible(true);
             _previewOverlay.IsVisible = false;
             _embeddedPreviewActive = true;
             _previewStopButton.IsEnabled = true;
@@ -3393,11 +3794,28 @@ public sealed class MainWindow : Window
             AppendLog($"\u9810\u89bd\u555f\u52d5\u5931\u6557: {ex.Message}");
             SetStatus("\u9810\u89bd\u4e0d\u53ef\u7528\uff0c\u8acb\u7528\u300c\u539f\u9801\u300d\u958b\u555f");
             _previewOverlay.IsVisible = true;
-            _previewWebView.IsVisible = false;
+            SafeSetPreviewWebViewVisible(false);
             if (autoplay && _parsedInfo is not null)
             {
                 OpenOriginalPage(_parsedInfo.WebpageUrl ?? _parsedInfo.Url);
             }
+        }
+    }
+
+    private void SafeSetPreviewWebViewVisible(bool visible)
+    {
+        if (!EmbeddedPreviewEnabled)
+        {
+            return;
+        }
+
+        try
+        {
+            _previewWebView.IsVisible = visible;
+        }
+        catch
+        {
+            // ignore — WebView may not be ready
         }
     }
 
@@ -3743,28 +4161,34 @@ public sealed class MainWindow : Window
         _pendingDirectEmbedUri = null;
         _previewReferer = null;
 
-        try
+        if (EmbeddedPreviewEnabled)
         {
-            if (_embeddedPreviewActive || _previewWebView.IsVisible)
+            try
             {
-                _previewWebView.Stop();
-                _previewWebView.Source = new Uri("about:blank");
+                if (_embeddedPreviewActive || _previewWebView.IsVisible)
+                {
+                    _previewWebView.Stop();
+                    _previewWebView.Source = new Uri("about:blank");
+                }
             }
-        }
-        catch
-        {
-            // ignore stop failures
+            catch
+            {
+                // ignore stop failures
+            }
+
+            SafeSetPreviewWebViewVisible(false);
         }
 
         _embeddedPreviewActive = false;
-        _previewWebView.IsVisible = false;
         _previewOverlay.IsVisible = true;
         _previewStopButton.IsEnabled = false;
 
         if (_parsedInfo is not null)
         {
             _previewPlayButton.IsEnabled = true;
-            _previewStatus.Text = "\u89e3\u6790\u6210\u529f \u00b7 \u53ef\u5167\u5d4c\u64ad\u653e";
+            _previewStatus.Text = EmbeddedPreviewEnabled
+                ? "\u89e3\u6790\u6210\u529f \u00b7 \u53ef\u5167\u5d4c\u64ad\u653e"
+                : "\u89e3\u6790\u6210\u529f \u00b7 \u8acb\u7528\u300c\u539f\u9801\u300d\u64ad\u653e";
             _previewStatus.Foreground = Green;
             if (clearStatus)
             {
@@ -5625,7 +6049,15 @@ public sealed class MainWindow : Window
             DateOnly.FromDateTime(DateTime.Now),
             _includeSubtitles,
             _cookiesFilePath,
-            _downloadPlaylist);
+            _downloadPlaylist,
+            _recentSearches
+                .Select(e => new RecentSearchSetting
+                {
+                    Query = e.Query,
+                    Platform = e.Platform,
+                    SearchedAtUtc = e.SearchedAtUtc
+                })
+                .ToList());
     }
 
     private static string NormalizeMp4Quality(string? quality)
@@ -5882,6 +6314,11 @@ public sealed class MainWindow : Window
         string? ThumbnailUrl,
         string? VideoId);
 
+    private sealed record RecentSearchEntry(
+        string Query,
+        string Platform,
+        DateTime SearchedAtUtc);
+
     private enum DownloadState
     {
         Queued,
@@ -6130,6 +6567,13 @@ public sealed class MainWindow : Window
     }
 }
 
+internal sealed class RecentSearchSetting
+{
+    public string Query { get; set; } = "";
+    public string Platform { get; set; } = "both";
+    public DateTime? SearchedAtUtc { get; set; }
+}
+
 internal sealed class AppSettings
 {
     private static readonly string SettingsDirectory = IoPath.Combine(
@@ -6152,6 +6596,7 @@ internal sealed class AppSettings
     public int TodayDownloadCount { get; init; }
     public DateOnly TodayDate { get; init; } = DateOnly.FromDateTime(DateTime.Now);
     public string? CookieFilePath { get; init; }
+    public List<RecentSearchSetting>? RecentSearches { get; init; }
 
     public static AppSettings Load()
     {
@@ -6164,6 +6609,22 @@ internal sealed class AppSettings
                 if (settings is not null)
                 {
                     var today = DateOnly.FromDateTime(DateTime.Now);
+                    var recent = (settings.RecentSearches ?? [])
+                        .Where(e => !string.IsNullOrWhiteSpace(e.Query))
+                        .GroupBy(e => (
+                            Query: e.Query.Trim().ToLowerInvariant(),
+                            Platform: (e.Platform ?? "both").Trim().ToLowerInvariant()))
+                        .Select(g => g.OrderByDescending(x => x.SearchedAtUtc ?? DateTime.MinValue).First())
+                        .OrderByDescending(e => e.SearchedAtUtc ?? DateTime.MinValue)
+                        .Take(12)
+                        .Select(e => new RecentSearchSetting
+                        {
+                            Query = e.Query.Trim(),
+                            Platform = e.Platform ?? "both",
+                            SearchedAtUtc = e.SearchedAtUtc
+                        })
+                        .ToList();
+
                     return new AppSettings
                     {
                         LastOutputFolder = Directory.Exists(settings.LastOutputFolder)
@@ -6179,7 +6640,8 @@ internal sealed class AppSettings
                         TodayDate = today,
                         CookieFilePath = !string.IsNullOrEmpty(settings.CookieFilePath) && File.Exists(settings.CookieFilePath)
                             ? settings.CookieFilePath
-                            : null
+                            : null,
+                        RecentSearches = recent
                     };
                 }
             }
@@ -6201,7 +6663,8 @@ internal sealed class AppSettings
         DateOnly? todayDate = null,
         bool includeSubtitles = false,
         string? cookieFilePath = null,
-        bool downloadPlaylist = false)
+        bool downloadPlaylist = false,
+        IReadOnlyList<RecentSearchSetting>? recentSearches = null)
     {
         try
         {
@@ -6216,7 +6679,8 @@ internal sealed class AppSettings
                 DownloadPlaylist = downloadPlaylist,
                 TodayDownloadCount = todayDownloadCount,
                 TodayDate = todayDate ?? DateOnly.FromDateTime(DateTime.Now),
-                CookieFilePath = cookieFilePath
+                CookieFilePath = cookieFilePath,
+                RecentSearches = recentSearches?.Take(12).ToList() ?? []
             };
             var json = JsonSerializer.Serialize(settings, new JsonSerializerOptions { WriteIndented = true });
             File.WriteAllText(SettingsPath, json);

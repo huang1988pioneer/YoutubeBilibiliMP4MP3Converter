@@ -8,6 +8,7 @@ Avalonia 桌面應用：將 **YouTube** 或 **Bilibili** 影片網址轉換成 *
 
 - 貼上 YouTube / Bilibili 網址（支援多行批量）
 - **搜尋影片**：關鍵字搜尋 YouTube / Bilibili（或兩者），點選結果即可解析預覽或開始轉換
+- **最近搜尋紀錄**：記住最近 12 筆關鍵字（含平台），可一鍵重搜、右鍵移除或全部清除
 - 解析網址：顯示標題、時長、觀看次數、上傳日期
 - 輸出格式：MP4（480P / 720P / 1080P / 4K）或 MP3
 - 下載清單：進度、速度、完成 / 失敗狀態
@@ -75,6 +76,7 @@ brew install yt-dlp ffmpeg
 - **YouTube**：透過本機 `yt-dlp`（`ytsearchN:關鍵字`）
 - **Bilibili**：優先使用 B 站官方搜尋 API；失敗時再嘗試 `yt-dlp bilisearch`
 - 可選擇平台（YouTube、Bilibili、兩者）與每平台結果數
+- 搜尋過的關鍵字會出現在「最近搜尋紀錄」：左鍵重搜、右鍵刪除單筆、可清除全部；紀錄會寫入本機設定
 
 ## 注意事項
 
