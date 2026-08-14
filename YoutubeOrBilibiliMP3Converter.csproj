@@ -21,4 +21,9 @@
     <PackageReference Include="Avalonia.Themes.Fluent" Version="12.0.3" />
     <PackageReference Include="Avalonia.Fonts.Inter" Version="12.0.3" />
   </ItemGroup>
+
+  <ItemGroup>
+    <Compile Remove="tests\**\*.cs" />
+    <InternalsVisibleTo Include="RegressionTests" />
+  </ItemGroup>
 </Project>

@@ -99,6 +99,8 @@ public sealed class MainWindow : Window
     private readonly TextBlock _previewStatus;
     private readonly TextBlock _queueCountText;
     private readonly TextBlock _statusText;
+    private readonly Border _parseErrorPanel;
+    private readonly TextBlock _parseErrorText;
     private readonly TextBlock _footerStats;
     private readonly TextBox _logText;
     private readonly Ellipse _mp4Radio;
@@ -109,6 +111,7 @@ public sealed class MainWindow : Window
     private readonly Button _cookiesBrowseButton;
     private readonly Button _cookiesClearButton;
     private string? _cookiesFilePath;
+    private string? _lastParseErrorDetail;
 
     private string _outputFormat = "MP4";
     private string _mp4Quality = "1080P";
@@ -514,6 +517,32 @@ public sealed class MainWindow : Window
             FontSize = 13,
             Foreground = TextSecondary,
             VerticalAlignment = VerticalAlignment.Center
+        };
+        _parseErrorText = new TextBlock
+        {
+            FontSize = 12,
+            Foreground = Brush.Parse("#912018"),
+            TextWrapping = TextWrapping.Wrap,
+            LineHeight = 18
+        };
+        var parseErrorBody = new StackPanel { Spacing = 4 };
+        parseErrorBody.Children.Add(new TextBlock
+        {
+            Text = "\u7121\u6cd5\u53d6\u5f97\u5f71\u7247\u8cc7\u8a0a",
+            FontSize = 13,
+            FontWeight = FontWeight.SemiBold,
+            Foreground = Brush.Parse("#7A271A")
+        });
+        parseErrorBody.Children.Add(_parseErrorText);
+        _parseErrorPanel = new Border
+        {
+            IsVisible = false,
+            Background = Brush.Parse("#FFF4F2"),
+            BorderBrush = Brush.Parse("#FECDCA"),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(10),
+            Padding = new Thickness(12, 10),
+            Child = parseErrorBody
         };
         _footerStats = new TextBlock
         {
@@ -1559,6 +1588,7 @@ public sealed class MainWindow : Window
 
         left.Children.Add(_convertButton);
         left.Children.Add(_statusText);
+        left.Children.Add(_parseErrorPanel);
 
         var leftCard = Card(left);
         row.Children.Add(leftCard);
@@ -3383,6 +3413,7 @@ public sealed class MainWindow : Window
         var urls = GetInputUrls();
         if (urls.Length == 0)
         {
+            HideParseError();
             SetStatus("\u8acb\u5148\u8cbc\u4e0a YouTube \u6216 Bilibili \u7db2\u5740");
             return;
         }
@@ -3390,7 +3421,8 @@ public sealed class MainWindow : Window
         var ytDlpPath = ToolLocator.FindExecutable("yt-dlp");
         if (ytDlpPath is null)
         {
-            SetStatus("\u627e\u4e0d\u5230 yt-dlp\uff0c\u8acb\u5148\u5b89\u88dd");
+            ShowParseError("\u7f3a\u5c11 yt-dlp\uff0c\u56e0\u6b64\u7121\u6cd5\u8b80\u53d6\u5f71\u7247\u8cc7\u8a0a\u3002\u8acb\u5148\u5b89\u88dd yt-dlp\uff0c\u91cd\u555f\u7a0b\u5f0f\u5f8c\u518d\u8a66\u3002");
+            SetStatus("\u89e3\u6790\u5931\u6557\uff1a\u627e\u4e0d\u5230 yt-dlp");
             AppendInstallHint();
             return;
         }
@@ -3400,6 +3432,8 @@ public sealed class MainWindow : Window
         _previewStopButton.IsEnabled = false;
         _previewBrowserButton.IsEnabled = false;
         StopEmbeddedPreview(clearStatus: false);
+        HideParseError();
+        _lastParseErrorDetail = null;
         SetStatus("\u6b63\u5728\u89e3\u6790\u7db2\u5740...");
         AppendLog($"\u89e3\u6790: {urls[0]}");
 
@@ -3410,11 +3444,14 @@ public sealed class MainWindow : Window
                 : await DumpVideoInfoAsync(ytDlpPath, urls[0]);
             if (info is null)
             {
-                SetStatus("\u89e3\u6790\u5931\u6557\uff0c\u8acb\u6aa2\u67e5\u7db2\u5740\u6216\u7a0d\u5f8c\u518d\u8a66");
+                var detail = _lastParseErrorDetail
+                    ?? "\u7121\u6cd5\u8b80\u53d6\u6b64\u7db2\u5740\u3002\u8acb\u78ba\u8a8d\u539f\u9801\u4ecd\u53ef\u64ad\u653e\uff1b\u82e5\u662f\u6703\u54e1\u6216\u767b\u5165\u9650\u5236\u5167\u5bb9\uff0c\u8acb\u532f\u5165 cookies.txt \u5f8c\u91cd\u8a66\u3002";
+                SetStatus("\u89e3\u6790\u5931\u6557\uff1a\u8acb\u67e5\u770b\u4e0b\u65b9\u8655\u7406\u65b9\u5f0f");
+                ShowParseError(detail);
                 _parsedInfo = null;
-                _previewTitle.Text = "\u89e3\u6790\u5931\u6557";
-                _previewStatus.Text = "\u89e3\u6790\u5931\u6557";
-                _previewStatus.Foreground = Brush.Parse("#EF4444");
+                _previewTitle.Text = "\u7121\u6cd5\u53d6\u5f97\u5f71\u7247\u8cc7\u8a0a";
+                _previewStatus.Text = "\u8acb\u4f9d\u5de6\u5074\u63d0\u793a\u8655\u7406\u5f8c\u91cd\u8a66";
+                _previewStatus.Foreground = Brush.Parse("#B42318");
                 ClearPreviewThumbnail();
                 return;
             }
@@ -3492,7 +3529,9 @@ public sealed class MainWindow : Window
         }
         catch (Exception ex)
         {
-            SetStatus("\u89e3\u6790\u6642\u767c\u751f\u932f\u8aa4");
+            var detail = "\u7a0b\u5f0f\u5728\u89e3\u6790\u6642\u767c\u751f\u672a\u9810\u671f\u932f\u8aa4\u3002\u8acb\u91cd\u8a66\uff1b\u82e5\u6301\u7e8c\u767c\u751f\uff0c\u8acb\u67e5\u770b\u300c\u904b\u884c\u8a18\u9304\u300d\u7684\u8a73\u7d30\u8cc7\u8a0a\u3002";
+            ShowParseError(detail);
+            SetStatus("\u89e3\u6790\u5931\u6557\uff1a\u7a0b\u5f0f\u767c\u751f\u672a\u9810\u671f\u932f\u8aa4");
             AppendLog(ex.Message);
         }
         finally
@@ -3508,7 +3547,10 @@ public sealed class MainWindow : Window
         }
     }
 
-    private async Task<ParsedVideoInfo?> DumpVideoInfoAsync(string ytDlpPath, string url)
+    private async Task<ParsedVideoInfo?> DumpVideoInfoAsync(
+        string ytDlpPath,
+        string url,
+        bool allowAutomaticBrowserCookies = true)
     {
         var startInfo = new ProcessStartInfo
         {
@@ -3526,13 +3568,11 @@ public sealed class MainWindow : Window
         startInfo.ArgumentList.Add("--encoding");
         startInfo.ArgumentList.Add("utf-8");
         AddBilibiliBrowserHeaders(startInfo, url);
-        var cookieBrowser = AddBilibiliBrowserCookies(startInfo, url);
-        if (cookieBrowser is not null)
+        var cookieSelection = AddCookieArguments(startInfo, url, allowAutomaticBrowserCookies);
+        if (cookieSelection is not null)
         {
-            AppendLog($"Bilibili cookies: {cookieBrowser}");
+            AppendLog($"Cookies: {cookieSelection.Label}");
         }
-
-        AddCookiesFileArgument(startInfo, url);
 
         startInfo.ArgumentList.Add(NormalizeMediaUrl(url));
 
@@ -3553,6 +3593,16 @@ public sealed class MainWindow : Window
                 AppendLog(stderr.Trim());
             }
 
+            // Browser sessions are optional for public Bilibili videos. If automatic
+            // extraction fails (locked/corrupt/stale profile), retry anonymously so an
+            // unrelated local browser problem cannot block public video parsing.
+            if (cookieSelection?.IsAutomaticBrowser == true)
+            {
+                AppendLog("\u81ea\u52d5\u8b80\u53d6\u700f\u89bd\u5668 Cookies \u5931\u6557\uff0c\u6539\u7528\u4e0d\u767b\u5165\u6a21\u5f0f\u91cd\u8a66\u3002");
+                return await DumpVideoInfoAsync(ytDlpPath, url, allowAutomaticBrowserCookies: false);
+            }
+
+            _lastParseErrorDetail = ClassifyParseFailure(stderr, url, cookieSelection);
             return null;
         }
 
@@ -3626,8 +3676,63 @@ public sealed class MainWindow : Window
         catch (Exception ex)
         {
             AppendLog($"JSON \u89e3\u6790\u5931\u6557: {ex.Message}");
+            _lastParseErrorDetail = "\u5df2\u6536\u5230\u5f71\u7247\u8cc7\u6599\uff0c\u4f46\u683c\u5f0f\u7121\u6cd5\u8b80\u53d6\u3002\u8acb\u66f4\u65b0 yt-dlp \u5f8c\u91cd\u8a66\u3002";
             return null;
         }
+    }
+
+    private void ShowParseError(string detail)
+    {
+        _parseErrorText.Text = detail;
+        _parseErrorPanel.IsVisible = true;
+    }
+
+    private void HideParseError()
+    {
+        _parseErrorPanel.IsVisible = false;
+        _parseErrorText.Text = "";
+    }
+
+    private static string ClassifyParseFailure(
+        string stderr,
+        string url,
+        CookieSelection? cookieSelection)
+    {
+        var error = stderr ?? "";
+        if (error.Contains("cookies database", StringComparison.OrdinalIgnoreCase)
+            || error.Contains("failed to decrypt", StringComparison.OrdinalIgnoreCase)
+            || error.Contains("could not copy", StringComparison.OrdinalIgnoreCase))
+        {
+            return "\u7121\u6cd5\u8b80\u53d6\u700f\u89bd\u5668\u7684\u767b\u5165\u8cc7\u6599\u3002\u8acb\u532f\u51fa cookies.txt \u4e26\u5728\u300cCookies \u6a94\u6848\u300d\u532f\u5165\uff0c\u518d\u91cd\u65b0\u89e3\u6790\u3002";
+        }
+
+        if (error.Contains("Failed to establish a new connection", StringComparison.OrdinalIgnoreCase)
+            || error.Contains("timed out", StringComparison.OrdinalIgnoreCase)
+            || error.Contains("Temporary failure", StringComparison.OrdinalIgnoreCase))
+        {
+            return "\u7121\u6cd5\u9023\u7dda\u5230\u5f71\u7247\u7db2\u7ad9\u3002\u8acb\u6aa2\u67e5\u7db2\u8def\u3001VPN \u6216\u9632\u706b\u7246\u8a2d\u5b9a\uff0c\u78ba\u8a8d\u539f\u9801\u53ef\u958b\u555f\u5f8c\u518d\u8a66\u3002";
+        }
+
+        if (error.Contains("login", StringComparison.OrdinalIgnoreCase)
+            || error.Contains("Sign in", StringComparison.OrdinalIgnoreCase)
+            || error.Contains("members-only", StringComparison.OrdinalIgnoreCase)
+            || error.Contains("premium", StringComparison.OrdinalIgnoreCase)
+            || error.Contains("403", StringComparison.OrdinalIgnoreCase))
+        {
+            return "\u6b64\u5f71\u7247\u53ef\u80fd\u9700\u8981\u767b\u5165\u6216\u89c0\u770b\u6b0a\u9650\u3002\u8acb\u532f\u51fa cookies.txt \u4e26\u5728\u300cCookies \u6a94\u6848\u300d\u532f\u5165\uff0c\u518d\u91cd\u65b0\u89e3\u6790\u3002";
+        }
+
+        if (error.Contains("Unsupported URL", StringComparison.OrdinalIgnoreCase))
+        {
+            return "\u9019\u4e0d\u662f\u53ef\u8fa8\u8b58\u7684 YouTube \u6216 Bilibili \u5f71\u7247\u7db2\u5740\u3002\u8acb\u5f9e\u5f71\u7247\u539f\u9801\u8907\u88fd\u5b8c\u6574\u7db2\u5740\u5f8c\u91cd\u8a66\u3002";
+        }
+
+        var cookieHint = cookieSelection is not null
+            ? "\u82e5\u5167\u5bb9\u6709\u767b\u5165\u9650\u5236\uff0c\u8acb\u66f4\u65b0 cookies.txt \u5f8c\u91cd\u8a66\u3002"
+            : "\u82e5\u5167\u5bb9\u6709\u767b\u5165\u9650\u5236\uff0c\u8acb\u532f\u5165 cookies.txt \u5f8c\u91cd\u8a66\u3002";
+        return IsBilibiliVideoUrl(url)
+            ? $"Bilibili \u672a\u56de\u50b3\u53ef\u7528\u7684\u5f71\u7247\u8cc7\u8a0a\u3002\u8acb\u78ba\u8a8d\u539f\u9801\u4ecd\u53ef\u64ad\u653e\u3002{cookieHint}"
+            : $"YouTube \u672a\u56de\u50b3\u53ef\u7528\u7684\u5f71\u7247\u8cc7\u8a0a\u3002\u8acb\u78ba\u8a8d\u539f\u9801\u4ecd\u53ef\u64ad\u653e\u3002{cookieHint}";
     }
 
     private static double? ExtractMaxFormatDurationSeconds(JsonElement root)
@@ -3984,8 +4089,7 @@ public sealed class MainWindow : Window
         startInfo.ArgumentList.Add("--encoding");
         startInfo.ArgumentList.Add("utf-8");
         AddBilibiliBrowserHeaders(startInfo, pageUrl);
-        _ = AddBilibiliBrowserCookies(startInfo, pageUrl);
-        AddCookiesFileArgument(startInfo, pageUrl);
+        _ = AddCookieArguments(startInfo, pageUrl);
         startInfo.ArgumentList.Add(NormalizeMediaUrl(pageUrl));
 
         using var process = new Process { StartInfo = startInfo };
@@ -4918,13 +5022,11 @@ public sealed class MainWindow : Window
         }
 
         AddBilibiliBrowserHeaders(startInfo, url);
-        var cookieBrowser = AddBilibiliBrowserCookies(startInfo, url);
-        if (cookieBrowser is not null)
+        var cookieSelection = AddCookieArguments(startInfo, url);
+        if (cookieSelection is not null)
         {
-            AppendLog($"Bilibili cookies: {cookieBrowser}");
+            AppendLog($"Cookies: {cookieSelection.Label}");
         }
-
-        AddCookiesFileArgument(startInfo, url);
 
         if (outputFormat == "MP3")
         {
@@ -5011,8 +5113,7 @@ public sealed class MainWindow : Window
                 ? "%(playlist_index&{} - |)s%(title)s.%(ext)s"
                 : "%(title)s.%(ext)s");
             AddBilibiliBrowserHeaders(startInfo, url);
-            AddBilibiliBrowserCookies(startInfo, url);
-            AddCookiesFileArgument(startInfo, url);
+            _ = AddCookieArguments(startInfo, url);
             startInfo.ArgumentList.Add(NormalizeMediaUrl(url, preservePlaylistParams: _downloadPlaylist));
 
             var code = await RunProcessAsync(startInfo, token, item);
@@ -5706,14 +5807,24 @@ public sealed class MainWindow : Window
         startInfo.ArgumentList.Add("Accept-Language:zh-CN,zh-TW;q=0.9,zh;q=0.8,en;q=0.7");
     }
 
-    private static string? AddBilibiliBrowserCookies(ProcessStartInfo startInfo, string url)
+    private CookieSelection? AddCookieArguments(
+        ProcessStartInfo startInfo,
+        string url,
+        bool allowAutomaticBrowserCookies = true)
     {
-        if (!IsBilibiliVideoUrl(url))
+        if (!string.IsNullOrEmpty(_cookiesFilePath) && File.Exists(_cookiesFilePath))
+        {
+            startInfo.ArgumentList.Add("--cookies");
+            startInfo.ArgumentList.Add(_cookiesFilePath);
+            return new CookieSelection($"\u6a94\u6848 {IoPath.GetFileName(_cookiesFilePath)}", IsAutomaticBrowser: false);
+        }
+
+        if (!allowAutomaticBrowserCookies || !IsBilibiliVideoUrl(url))
         {
             return null;
         }
 
-        var browser = FindBrowserForCookies();
+        var browser = FindBrowserWithCookies();
         if (browser is null)
         {
             return null;
@@ -5721,73 +5832,22 @@ public sealed class MainWindow : Window
 
         startInfo.ArgumentList.Add("--cookies-from-browser");
         startInfo.ArgumentList.Add(browser);
-        return browser;
+        return new CookieSelection($"\u700f\u89bd\u5668 {browser}", IsAutomaticBrowser: true);
     }
 
-    private void AddCookiesFileArgument(ProcessStartInfo startInfo, string url)
+    private static string? FindBrowserWithCookies()
     {
-        if (string.IsNullOrEmpty(_cookiesFilePath) || !File.Exists(_cookiesFilePath))
-        {
-            return;
-        }
-
-        // If Bilibili browser cookies were already added, skip the file-based cookies.
-        if (IsBilibiliVideoUrl(url))
-        {
-            return;
-        }
-
-        startInfo.ArgumentList.Add("--cookies");
-        startInfo.ArgumentList.Add(_cookiesFilePath);
-    }
-
-    private static string? FindBrowserForCookies()
-    {
-        if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
-        {
-            if (Directory.Exists("/Applications/Firefox.app"))
-            {
-                return "firefox";
-            }
-
-            if (Directory.Exists("/Applications/Google Chrome.app"))
-            {
-                return "chrome";
-            }
-
-            if (Directory.Exists("/Applications/Safari.app"))
-            {
-                return "safari";
-            }
-        }
-
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
         {
-            var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-            var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
-            var programFilesX86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+            return BrowserCookieLocator.FindWindowsBrowser(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData));
+        }
 
-            // Prefer Chromium browsers first: most Bilibili sessions (incl. 包月充电) live there.
-            if (Directory.Exists(IoPath.Combine(localAppData, "Google", "Chrome"))
-                || Directory.Exists(IoPath.Combine(programFiles, "Google", "Chrome"))
-                || Directory.Exists(IoPath.Combine(programFilesX86, "Google", "Chrome")))
-            {
-                return "chrome";
-            }
-
-            if (Directory.Exists(IoPath.Combine(localAppData, "Microsoft", "Edge"))
-                || Directory.Exists(IoPath.Combine(programFiles, "Microsoft", "Edge"))
-                || Directory.Exists(IoPath.Combine(programFilesX86, "Microsoft", "Edge")))
-            {
-                return "edge";
-            }
-
-            if (Directory.Exists(IoPath.Combine(localAppData, "Mozilla", "Firefox"))
-                || Directory.Exists(IoPath.Combine(programFiles, "Mozilla Firefox"))
-                || Directory.Exists(IoPath.Combine(programFilesX86, "Mozilla Firefox")))
-            {
-                return "firefox";
-            }
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+        {
+            return BrowserCookieLocator.FindMacBrowser(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
         }
 
         return null;
@@ -6420,6 +6480,7 @@ public sealed class MainWindow : Window
 
     private sealed record NavItem(string Id, Border Border);
     private sealed record PreviewStreamInfo(string Url, string Referer);
+    private sealed record CookieSelection(string Label, bool IsAutomaticBrowser);
     private sealed record ParsedVideoInfo(
         string Title,
         double? DurationSeconds,
@@ -6859,6 +6920,92 @@ internal sealed class AppSettings
             "1080P" or "1080" => "1080P",
             _ => "1080P"
         };
+    }
+}
+
+internal static class BrowserCookieLocator
+{
+    public static string? FindWindowsBrowser(string localAppData, string roamingAppData)
+    {
+        var chromeRoot = IoPath.Combine(localAppData, "Google", "Chrome", "User Data");
+        if (HasChromiumCookies(chromeRoot))
+        {
+            return "chrome";
+        }
+
+        var edgeRoot = IoPath.Combine(localAppData, "Microsoft", "Edge", "User Data");
+        if (HasChromiumCookies(edgeRoot))
+        {
+            return "edge";
+        }
+
+        var firefoxRoot = IoPath.Combine(roamingAppData, "Mozilla", "Firefox", "Profiles");
+        if (HasFirefoxCookies(firefoxRoot))
+        {
+            return "firefox";
+        }
+
+        return null;
+    }
+
+    public static string? FindMacBrowser(string userProfile)
+    {
+        var appSupport = IoPath.Combine(userProfile, "Library", "Application Support");
+        if (HasFirefoxCookies(IoPath.Combine(appSupport, "Firefox", "Profiles")))
+        {
+            return "firefox";
+        }
+
+        if (HasChromiumCookies(IoPath.Combine(appSupport, "Google", "Chrome")))
+        {
+            return "chrome";
+        }
+
+        if (File.Exists(IoPath.Combine(userProfile, "Library", "Cookies", "Cookies.binarycookies")))
+        {
+            return "safari";
+        }
+
+        return null;
+    }
+
+    private static bool HasChromiumCookies(string userDataRoot)
+    {
+        try
+        {
+            if (!Directory.Exists(userDataRoot))
+            {
+                return false;
+            }
+
+            return Directory.EnumerateDirectories(userDataRoot)
+                .Where(path =>
+                {
+                    var name = IoPath.GetFileName(path);
+                    return name.Equals("Default", StringComparison.OrdinalIgnoreCase)
+                        || name.StartsWith("Profile ", StringComparison.OrdinalIgnoreCase);
+                })
+                .Any(path =>
+                    File.Exists(IoPath.Combine(path, "Network", "Cookies"))
+                    || File.Exists(IoPath.Combine(path, "Cookies")));
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool HasFirefoxCookies(string profilesRoot)
+    {
+        try
+        {
+            return Directory.Exists(profilesRoot)
+                && Directory.EnumerateFiles(profilesRoot, "cookies.sqlite", SearchOption.AllDirectories).Any();
+        }
+        catch
+        {
+            return false;
+        }
     }
 }
 
