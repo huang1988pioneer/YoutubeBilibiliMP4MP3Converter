@@ -112,6 +112,7 @@ public sealed class MainWindow : Window
     private readonly Button _cookiesClearButton;
     private string? _cookiesFilePath;
     private string? _lastParseErrorDetail;
+    private bool _automaticBrowserCookiesUnavailable;
 
     private string _outputFormat = "MP4";
     private string _mp4Quality = "1080P";
@@ -3598,6 +3599,7 @@ public sealed class MainWindow : Window
             // unrelated local browser problem cannot block public video parsing.
             if (cookieSelection?.IsAutomaticBrowser == true)
             {
+                _automaticBrowserCookiesUnavailable = true;
                 AppendLog("\u81ea\u52d5\u8b80\u53d6\u700f\u89bd\u5668 Cookies \u5931\u6557\uff0c\u6539\u7528\u4e0d\u767b\u5165\u6a21\u5f0f\u91cd\u8a66\u3002");
                 return await DumpVideoInfoAsync(ytDlpPath, url, allowAutomaticBrowserCookies: false);
             }
@@ -5001,6 +5003,58 @@ public sealed class MainWindow : Window
         CancellationToken token,
         DownloadItemView? item)
     {
+        var firstAttempt = await RunYtDlpAttemptAsync(
+            ytDlpPath,
+            ffmpegPath,
+            ffprobePath,
+            url,
+            outputPath,
+            outputFormat,
+            mp4Quality,
+            includeSubtitles,
+            token,
+            item,
+            allowAutomaticBrowserCookies: true);
+
+        if (!CookieRetryPolicy.ShouldRetryWithoutAutomaticCookies(
+                firstAttempt.ExitCode,
+                firstAttempt.UsedAutomaticBrowserCookies))
+        {
+            return firstAttempt.ExitCode;
+        }
+
+        _automaticBrowserCookiesUnavailable = true;
+        AppendLog("\u700f\u89bd\u5668 Cookies \u7121\u6cd5\u7528\u65bc\u4e0b\u8f09\uff0c\u6539\u7528\u4e0d\u767b\u5165\u6a21\u5f0f\u91cd\u8a66\u3002");
+        item?.SetProgress(0, "\u6539\u7528\u516c\u958b\u6a21\u5f0f\u91cd\u8a66");
+
+        var retryAttempt = await RunYtDlpAttemptAsync(
+            ytDlpPath,
+            ffmpegPath,
+            ffprobePath,
+            url,
+            outputPath,
+            outputFormat,
+            mp4Quality,
+            includeSubtitles,
+            token,
+            item,
+            allowAutomaticBrowserCookies: false);
+        return retryAttempt.ExitCode;
+    }
+
+    private async Task<YtDlpAttemptResult> RunYtDlpAttemptAsync(
+        string ytDlpPath,
+        string ffmpegPath,
+        string ffprobePath,
+        string url,
+        string outputPath,
+        string outputFormat,
+        string mp4Quality,
+        bool includeSubtitles,
+        CancellationToken token,
+        DownloadItemView? item,
+        bool allowAutomaticBrowserCookies)
+    {
         var startInfo = CreateYtDlpStartInfo(ytDlpPath, ffmpegPath, ffprobePath);
         AddOutputFormatArguments(startInfo, outputFormat, mp4Quality);
         startInfo.ArgumentList.Add("--encoding");
@@ -5022,7 +5076,7 @@ public sealed class MainWindow : Window
         }
 
         AddBilibiliBrowserHeaders(startInfo, url);
-        var cookieSelection = AddCookieArguments(startInfo, url);
+        var cookieSelection = AddCookieArguments(startInfo, url, allowAutomaticBrowserCookies);
         if (cookieSelection is not null)
         {
             AppendLog($"Cookies: {cookieSelection.Label}");
@@ -5050,7 +5104,10 @@ public sealed class MainWindow : Window
             : "%(title)s.%(ext)s");
         startInfo.ArgumentList.Add(NormalizeMediaUrl(url, preservePlaylistParams: _downloadPlaylist));
 
-        return await RunProcessAsync(startInfo, token, item);
+        var exitCode = await RunProcessAsync(startInfo, token, item);
+        return new YtDlpAttemptResult(
+            exitCode,
+            UsedAutomaticBrowserCookies: cookieSelection?.IsAutomaticBrowser == true);
     }
 
     private async Task RunSubtitleDownloadAsync(
@@ -5819,7 +5876,10 @@ public sealed class MainWindow : Window
             return new CookieSelection($"\u6a94\u6848 {IoPath.GetFileName(_cookiesFilePath)}", IsAutomaticBrowser: false);
         }
 
-        if (!allowAutomaticBrowserCookies || !IsBilibiliVideoUrl(url))
+        if (!CookieRetryPolicy.ShouldUseAutomaticCookies(
+                allowAutomaticBrowserCookies,
+                _automaticBrowserCookiesUnavailable,
+                IsBilibiliVideoUrl(url)))
         {
             return null;
         }
@@ -6481,6 +6541,7 @@ public sealed class MainWindow : Window
     private sealed record NavItem(string Id, Border Border);
     private sealed record PreviewStreamInfo(string Url, string Referer);
     private sealed record CookieSelection(string Label, bool IsAutomaticBrowser);
+    private sealed record YtDlpAttemptResult(int ExitCode, bool UsedAutomaticBrowserCookies);
     private sealed record ParsedVideoInfo(
         string Title,
         double? DurationSeconds,
@@ -6921,6 +6982,18 @@ internal sealed class AppSettings
             _ => "1080P"
         };
     }
+}
+
+internal static class CookieRetryPolicy
+{
+    public static bool ShouldUseAutomaticCookies(
+        bool automaticCookiesRequested,
+        bool automaticCookiesUnavailable,
+        bool isBilibiliUrl) =>
+        automaticCookiesRequested && !automaticCookiesUnavailable && isBilibiliUrl;
+
+    public static bool ShouldRetryWithoutAutomaticCookies(int exitCode, bool usedAutomaticCookies) =>
+        exitCode != 0 && usedAutomaticCookies;
 }
 
 internal static class BrowserCookieLocator

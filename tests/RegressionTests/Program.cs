@@ -24,7 +24,19 @@ try
     AssertEqual("firefox", BrowserCookieLocator.FindWindowsBrowser(local, roaming),
         "Firefox profile is detected by cookies.sqlite");
 
-    Console.WriteLine("PASS: browser cookie detection regression tests");
+    AssertTrue(CookieRetryPolicy.ShouldRetryWithoutAutomaticCookies(exitCode: 1, usedAutomaticCookies: true),
+        "Failed automatic browser cookies must retry anonymously");
+    AssertFalse(CookieRetryPolicy.ShouldRetryWithoutAutomaticCookies(exitCode: 1, usedAutomaticCookies: false),
+        "Failed user-supplied cookies must not silently drop authentication");
+    AssertFalse(CookieRetryPolicy.ShouldRetryWithoutAutomaticCookies(exitCode: 0, usedAutomaticCookies: true),
+        "Successful downloads must not run twice");
+    AssertFalse(CookieRetryPolicy.ShouldUseAutomaticCookies(
+            automaticCookiesRequested: true,
+            automaticCookiesUnavailable: true,
+            isBilibiliUrl: true),
+        "A browser cookie source that failed during parsing must stay disabled for downloading");
+
+    Console.WriteLine("PASS: cookie handling regression tests");
     return 0;
 }
 finally
@@ -42,3 +54,13 @@ static void AssertEqual(string? expected, string? actual, string message)
         throw new InvalidOperationException($"{message}. Expected: {expected ?? "<null>"}; Actual: {actual ?? "<null>"}");
     }
 }
+
+static void AssertTrue(bool actual, string message)
+{
+    if (!actual)
+    {
+        throw new InvalidOperationException(message);
+    }
+}
+
+static void AssertFalse(bool actual, string message) => AssertTrue(!actual, message);
