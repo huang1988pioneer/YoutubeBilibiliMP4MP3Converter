@@ -138,6 +138,8 @@ public sealed class MainWindow : Window
     private Uri? _pendingDirectEmbedUri;
     private CancellationTokenSource? _previewLoadCts;
     private int _previewStreamVersion;
+    private bool _lastRunForbidden;
+    private bool _warnedOutdatedYtDlp;
 
     // UI update throttling — high-frequency yt-dlp output previously flooded the UI thread
     // and froze/crashed the app during download.
@@ -164,11 +166,11 @@ public sealed class MainWindow : Window
 
         Title = "\u5f71\u97f3\u8f49\u63db\u5927\u5e2b v1.0";
         Width = 1180;
-        Height = 780;
+        Height = RuntimeInformation.IsOSPlatform(OSPlatform.OSX) ? 860 : 780;
         MinWidth = 980;
-        MinHeight = 680;
+        MinHeight = RuntimeInformation.IsOSPlatform(OSPlatform.OSX) ? 720 : 680;
         Background = BgApp;
-        FontFamily = new FontFamily("Microsoft JhengHei UI, Segoe UI, Inter, sans-serif");
+        FontFamily = new FontFamily(PlatformCopy.UiFontFamily);
 
         _urlBox = CreateInputBox("https://www.youtube.com/watch?v=... \u6216 Bilibili \u5f71\u7247\u7db2\u5740");
         _outputBox = CreateInputBox("\u9078\u64c7\u8f38\u51fa\u8cc7\u6599\u593e");
@@ -303,7 +305,7 @@ public sealed class MainWindow : Window
         _convertButton = new Button
         {
             Content = "\u958b\u59cb\u8f49\u63db",
-            MinHeight = 48,
+            MinHeight = 44,
             FontSize = 16,
             FontWeight = FontWeight.SemiBold,
             Foreground = Brushes.White,
@@ -485,8 +487,8 @@ public sealed class MainWindow : Window
         };
         _previewPlayerHost = new Border
         {
-            Height = 240,
-            MinHeight = 200,
+            Height = RuntimeInformation.IsOSPlatform(OSPlatform.OSX) ? 168 : 200,
+            MinHeight = 140,
             CornerRadius = new CornerRadius(12),
             ClipToBounds = true,
             Background = Brush.Parse("#0F172A"),
@@ -559,7 +561,7 @@ public sealed class MainWindow : Window
             IsReadOnly = true,
             AcceptsReturn = true,
             TextWrapping = TextWrapping.Wrap,
-            FontFamily = new FontFamily("Consolas, Microsoft JhengHei UI, monospace"),
+            FontFamily = new FontFamily(PlatformCopy.MonoFontFamily),
             FontSize = 11,
             Foreground = Brush.Parse("#D1D5DB"),
             Background = Brushes.Transparent,
@@ -592,7 +594,9 @@ public sealed class MainWindow : Window
         var main = new Border
         {
             Background = BgApp,
-            Padding = new Thickness(22, 18, 22, 12),
+            Padding = RuntimeInformation.IsOSPlatform(OSPlatform.OSX)
+                ? new Thickness(20, 12, 20, 8)
+                : new Thickness(22, 18, 22, 12),
             Child = new ScrollViewer
             {
                 Content = _mainHost,
@@ -1209,6 +1213,17 @@ public sealed class MainWindow : Window
                 return true;
             }
 
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+            {
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = "open",
+                    ArgumentList = { "-R", path },
+                    UseShellExecute = false
+                });
+                return true;
+            }
+
             var dir = IoPath.GetDirectoryName(path);
             if (string.IsNullOrWhiteSpace(dir))
             {
@@ -1417,13 +1432,13 @@ public sealed class MainWindow : Window
 
         var left = new StackPanel { Spacing = 4 };
         var titlePanel = new WrapPanel { Orientation = Orientation.Horizontal };
-        titlePanel.Children.Add(ColoredWord("YouTube", RedYouTube, 26, FontWeight.Bold));
-        titlePanel.Children.Add(ColoredWord(" / ", TextPrimary, 26, FontWeight.Bold));
-        titlePanel.Children.Add(ColoredWord("Bilibili", PinkBili, 26, FontWeight.Bold));
-        titlePanel.Children.Add(ColoredWord(" \u5f71\u7247\u8f49 ", TextPrimary, 26, FontWeight.Bold));
-        titlePanel.Children.Add(ColoredWord("MP4", Blue, 26, FontWeight.Bold));
-        titlePanel.Children.Add(ColoredWord(" / ", TextPrimary, 26, FontWeight.Bold));
-        titlePanel.Children.Add(ColoredWord("MP3", Green, 26, FontWeight.Bold));
+        titlePanel.Children.Add(ColoredWord("YouTube", RedYouTube, 22, FontWeight.Bold));
+        titlePanel.Children.Add(ColoredWord(" / ", TextPrimary, 22, FontWeight.Bold));
+        titlePanel.Children.Add(ColoredWord("Bilibili", PinkBili, 22, FontWeight.Bold));
+        titlePanel.Children.Add(ColoredWord(" \u5f71\u7247\u8f49 ", TextPrimary, 22, FontWeight.Bold));
+        titlePanel.Children.Add(ColoredWord("MP4", Blue, 22, FontWeight.Bold));
+        titlePanel.Children.Add(ColoredWord(" / ", TextPrimary, 22, FontWeight.Bold));
+        titlePanel.Children.Add(ColoredWord("MP3", Green, 22, FontWeight.Bold));
 
         left.Children.Add(titlePanel);
         left.Children.Add(new TextBlock
@@ -1504,7 +1519,7 @@ public sealed class MainWindow : Window
             ColumnSpacing = 14
         };
 
-        var left = new StackPanel { Spacing = 12 };
+        var left = new StackPanel { Spacing = 8 };
 
         left.Children.Add(new TextBlock
         {
@@ -1711,7 +1726,13 @@ public sealed class MainWindow : Window
         Grid.SetColumn(_clearQueueButton, 2);
         queueHeader.Children.Add(_clearQueueButton);
         queueBody.Children.Add(queueHeader);
-        queueBody.Children.Add(_downloadListPanel);
+        queueBody.Children.Add(new ScrollViewer
+        {
+            MaxHeight = 220,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            Content = _downloadListPanel
+        });
 
         var queueCard = Card(queueBody);
         row.Children.Add(queueCard);
@@ -1818,8 +1839,8 @@ public sealed class MainWindow : Window
             BorderThickness = new Thickness(1),
             CornerRadius = new CornerRadius(10),
             Padding = new Thickness(8, 6),
-            MinHeight = 120,
-            MaxHeight = 200,
+            MinHeight = 88,
+            MaxHeight = 160,
             Child = _logText
         });
         return Card(body);
@@ -1837,7 +1858,7 @@ public sealed class MainWindow : Window
 
         var left = new TextBlock
         {
-            Text = "\u7248\u672c\uff1a1.0.0  |  \u652f\u63f4 Windows 10/11",
+            Text = PlatformCopy.SupportedPlatformsLabel(),
             FontSize = 12,
             Foreground = TextMuted,
             VerticalAlignment = VerticalAlignment.Center
@@ -1881,9 +1902,9 @@ public sealed class MainWindow : Window
             BorderBrush = selected ? accent : BorderSoft,
             BorderThickness = new Thickness(selected ? 2 : 1),
             CornerRadius = new CornerRadius(12),
-            Padding = new Thickness(14, 16),
+            Padding = new Thickness(14, 12),
             Cursor = new Cursor(StandardCursorType.Hand),
-            MinHeight = 72
+            MinHeight = 56
         };
 
         var row = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto") };
@@ -3516,15 +3537,13 @@ public sealed class MainWindow : Window
             }
 
             _ = LoadPreviewThumbnailAsync(info.ThumbnailUrl);
-            // Auto stream preview only where embedded WebView is safe (non-Windows).
-            if (!info.IsChannel && EmbeddedPreviewEnabled)
+            // Do not auto-start NativeWebView. On macOS it is a native overlay that
+            // does not scroll with Avalonia content and clips the convert button.
+            if (!info.IsChannel)
             {
-                // Auto-load a local HTML5 stream preview (avoids YouTube embed 152/153 blocks).
-                _ = StartEmbeddedPreviewAsync(autoplay: false);
-            }
-            else if (!info.IsChannel)
-            {
-                _previewStatus.Text = "\u89e3\u6790\u6210\u529f \u00b7 \u8acb\u7528\u300c\u539f\u9801\u300d\u64ad\u653e";
+                _previewStatus.Text = EmbeddedPreviewEnabled
+                    ? "\u89e3\u6790\u6210\u529f \u00b7 \u53ef\u9ede\u5167\u5d4c\u64ad\u653e"
+                    : "\u89e3\u6790\u6210\u529f \u00b7 \u8acb\u7528\u300c\u539f\u9801\u300d\u64ad\u653e";
                 _previewStatus.Foreground = Green;
             }
         }
@@ -3568,6 +3587,7 @@ public sealed class MainWindow : Window
         startInfo.ArgumentList.Add("--skip-download");
         startInfo.ArgumentList.Add("--encoding");
         startInfo.ArgumentList.Add("utf-8");
+        AddYoutubeCompatibilityArguments(startInfo, url, fallback: false);
         AddBilibiliBrowserHeaders(startInfo, url);
         var cookieSelection = AddCookieArguments(startInfo, url, allowAutomaticBrowserCookies);
         if (cookieSelection is not null)
@@ -3721,6 +3741,12 @@ public sealed class MainWindow : Window
             || error.Contains("premium", StringComparison.OrdinalIgnoreCase)
             || error.Contains("403", StringComparison.OrdinalIgnoreCase))
         {
+            if (YoutubeDownloadPolicy.IsYouTubeUrl(url) && YoutubeDownloadPolicy.LooksLikeHttpForbidden(error))
+            {
+                return YoutubeDownloadPolicy.ForbiddenGiveUpHint(
+                    RuntimeInformation.IsOSPlatform(OSPlatform.OSX));
+            }
+
             return "\u6b64\u5f71\u7247\u53ef\u80fd\u9700\u8981\u767b\u5165\u6216\u89c0\u770b\u6b0a\u9650\u3002\u8acb\u532f\u51fa cookies.txt \u4e26\u5728\u300cCookies \u6a94\u6848\u300d\u532f\u5165\uff0c\u518d\u91cd\u65b0\u89e3\u6790\u3002";
         }
 
@@ -4814,6 +4840,21 @@ public sealed class MainWindow : Window
                 title = "\u64ad\u653e\u6e05\u55ae \u00b7 " + title;
             }
 
+            var existing = _downloadItems.FirstOrDefault(i =>
+                UrlsLikelySameVideo(i.Url, url)
+                && string.Equals(i.Format, _outputFormat, StringComparison.OrdinalIgnoreCase));
+            if (existing is not null)
+            {
+                if (existing.State is DownloadState.Queued or DownloadState.Running or DownloadState.Paused)
+                {
+                    AppendLog($"\u5df2\u5728\u6e05\u55ae\u4e2d\uff0c\u7565\u904e\u91cd\u8907\u9805\u76ee: {existing.Title}");
+                    continue;
+                }
+
+                existing.ResetForRetry();
+                continue;
+            }
+
             var item = new DownloadItemView(title, url, _outputFormat, _mp4Quality);
             item.OnRemove = () =>
             {
@@ -5003,6 +5044,7 @@ public sealed class MainWindow : Window
         CancellationToken token,
         DownloadItemView? item)
     {
+        _lastRunForbidden = false;
         var firstAttempt = await RunYtDlpAttemptAsync(
             ytDlpPath,
             ffmpegPath,
@@ -5016,30 +5058,68 @@ public sealed class MainWindow : Window
             item,
             allowAutomaticBrowserCookies: true);
 
-        if (!CookieRetryPolicy.ShouldRetryWithoutAutomaticCookies(
+        if (firstAttempt.ExitCode == 0)
+        {
+            return 0;
+        }
+
+        if (CookieRetryPolicy.ShouldRetryWithoutAutomaticCookies(
                 firstAttempt.ExitCode,
                 firstAttempt.UsedAutomaticBrowserCookies))
         {
-            return firstAttempt.ExitCode;
+            _automaticBrowserCookiesUnavailable = true;
+            AppendLog("\u700f\u89bd\u5668 Cookies \u7121\u6cd5\u7528\u65bc\u4e0b\u8f09\uff0c\u6539\u7528\u4e0d\u767b\u5165\u6a21\u5f0f\u91cd\u8a66\u3002");
+            item?.SetProgress(0, "\u6539\u7528\u516c\u958b\u6a21\u5f0f\u91cd\u8a66");
+            _lastRunForbidden = false;
+            firstAttempt = await RunYtDlpAttemptAsync(
+                ytDlpPath,
+                ffmpegPath,
+                ffprobePath,
+                url,
+                outputPath,
+                outputFormat,
+                mp4Quality,
+                includeSubtitles,
+                token,
+                item,
+                allowAutomaticBrowserCookies: false);
+            if (firstAttempt.ExitCode == 0)
+            {
+                return 0;
+            }
         }
 
-        _automaticBrowserCookiesUnavailable = true;
-        AppendLog("\u700f\u89bd\u5668 Cookies \u7121\u6cd5\u7528\u65bc\u4e0b\u8f09\uff0c\u6539\u7528\u4e0d\u767b\u5165\u6a21\u5f0f\u91cd\u8a66\u3002");
-        item?.SetProgress(0, "\u6539\u7528\u516c\u958b\u6a21\u5f0f\u91cd\u8a66");
+        if (YoutubeDownloadPolicy.IsYouTubeUrl(url) && _lastRunForbidden)
+        {
+            AppendLog(YoutubeDownloadPolicy.ForbiddenRetryHint());
+            item?.SetProgress(0, "\u76f8\u5bb9\u6a21\u5f0f\u91cd\u8a66");
+            _lastRunForbidden = false;
+            var fallback = await RunYtDlpAttemptAsync(
+                ytDlpPath,
+                ffmpegPath,
+                ffprobePath,
+                url,
+                outputPath,
+                outputFormat,
+                mp4Quality,
+                includeSubtitles,
+                token,
+                item,
+                allowAutomaticBrowserCookies: true,
+                youtubeFallback: true,
+                allowAutomaticForAnySite: true);
+            if (fallback.ExitCode != 0 && _lastRunForbidden)
+            {
+                AppendLog(YoutubeDownloadPolicy.ForbiddenGiveUpHint(
+                    RuntimeInformation.IsOSPlatform(OSPlatform.OSX)));
+                SetStatus(YoutubeDownloadPolicy.ForbiddenGiveUpHint(
+                    RuntimeInformation.IsOSPlatform(OSPlatform.OSX)));
+            }
 
-        var retryAttempt = await RunYtDlpAttemptAsync(
-            ytDlpPath,
-            ffmpegPath,
-            ffprobePath,
-            url,
-            outputPath,
-            outputFormat,
-            mp4Quality,
-            includeSubtitles,
-            token,
-            item,
-            allowAutomaticBrowserCookies: false);
-        return retryAttempt.ExitCode;
+            return fallback.ExitCode;
+        }
+
+        return firstAttempt.ExitCode;
     }
 
     private async Task<YtDlpAttemptResult> RunYtDlpAttemptAsync(
@@ -5053,7 +5133,9 @@ public sealed class MainWindow : Window
         bool includeSubtitles,
         CancellationToken token,
         DownloadItemView? item,
-        bool allowAutomaticBrowserCookies)
+        bool allowAutomaticBrowserCookies,
+        bool youtubeFallback = false,
+        bool allowAutomaticForAnySite = false)
     {
         var startInfo = CreateYtDlpStartInfo(ytDlpPath, ffmpegPath, ffprobePath);
         AddOutputFormatArguments(startInfo, outputFormat, mp4Quality);
@@ -5075,8 +5157,13 @@ public sealed class MainWindow : Window
             AddSubtitleArguments(startInfo, forEmbedDuringDownload: false);
         }
 
+        AddYoutubeCompatibilityArguments(startInfo, url, youtubeFallback);
         AddBilibiliBrowserHeaders(startInfo, url);
-        var cookieSelection = AddCookieArguments(startInfo, url, allowAutomaticBrowserCookies);
+        var cookieSelection = AddCookieArguments(
+            startInfo,
+            url,
+            allowAutomaticBrowserCookies,
+            allowAutomaticForAnySite);
         if (cookieSelection is not null)
         {
             AppendLog($"Cookies: {cookieSelection.Label}");
@@ -5824,7 +5911,7 @@ public sealed class MainWindow : Window
         if (outputFormat == "MP4")
         {
             startInfo.ArgumentList.Add("--format");
-            startInfo.ArgumentList.Add(GetMp4FormatSelector(mp4Quality));
+            startInfo.ArgumentList.Add(YoutubeDownloadPolicy.GetMp4FormatSelector(mp4Quality));
             startInfo.ArgumentList.Add("--merge-output-format");
             startInfo.ArgumentList.Add("mp4");
             return;
@@ -5837,16 +5924,38 @@ public sealed class MainWindow : Window
         startInfo.ArgumentList.Add("0");
     }
 
-    private static string GetMp4FormatSelector(string mp4Quality)
+    private void AddYoutubeCompatibilityArguments(ProcessStartInfo startInfo, string url, bool fallback)
     {
-        var maxHeight = mp4Quality.ToUpperInvariant() switch
+        if (!YoutubeDownloadPolicy.IsYouTubeUrl(url))
         {
-            "4K" => 2160,
-            "720P" => 720,
-            "480P" => 480,
-            _ => 1080
-        };
-        return $"bestvideo*[height<={maxHeight}]+bestaudio/best[height<={maxHeight}]/best";
+            return;
+        }
+
+        startInfo.ArgumentList.Add("--extractor-args");
+        startInfo.ArgumentList.Add(fallback
+            ? YoutubeDownloadPolicy.FallbackExtractorArgs
+            : YoutubeDownloadPolicy.StandardExtractorArgs);
+        startInfo.ArgumentList.Add("--force-ipv4");
+        AddJsRuntimeArguments(startInfo);
+        if (fallback)
+        {
+            startInfo.ArgumentList.Add("--rm-cache-dir");
+        }
+    }
+
+    private void AddJsRuntimeArguments(ProcessStartInfo startInfo)
+    {
+        foreach (var name in new[] { "deno", "node" })
+        {
+            var path = ToolLocator.FindExecutable(name);
+            if (path is null)
+            {
+                continue;
+            }
+
+            startInfo.ArgumentList.Add("--js-runtimes");
+            startInfo.ArgumentList.Add($"{name}:{path}");
+        }
     }
 
     private static void AddBilibiliBrowserHeaders(ProcessStartInfo startInfo, string url)
@@ -5867,7 +5976,8 @@ public sealed class MainWindow : Window
     private CookieSelection? AddCookieArguments(
         ProcessStartInfo startInfo,
         string url,
-        bool allowAutomaticBrowserCookies = true)
+        bool allowAutomaticBrowserCookies = true,
+        bool allowAutomaticForAnySite = false)
     {
         if (!string.IsNullOrEmpty(_cookiesFilePath) && File.Exists(_cookiesFilePath))
         {
@@ -5879,7 +5989,8 @@ public sealed class MainWindow : Window
         if (!CookieRetryPolicy.ShouldUseAutomaticCookies(
                 allowAutomaticBrowserCookies,
                 _automaticBrowserCookiesUnavailable,
-                IsBilibiliVideoUrl(url)))
+                IsBilibiliVideoUrl(url),
+                allowAutomaticForAnySite))
         {
             return null;
         }
@@ -6115,6 +6226,18 @@ public sealed class MainWindow : Window
 
         AppendLog(line);
         TryUpdateProgress(line, item);
+
+        if (YoutubeDownloadPolicy.LooksLikeHttpForbidden(line))
+        {
+            _lastRunForbidden = true;
+        }
+
+        if (!_warnedOutdatedYtDlp && YoutubeDownloadPolicy.LooksLikeOutdatedYtDlp(line))
+        {
+            _warnedOutdatedYtDlp = true;
+            AppendLog(YoutubeDownloadPolicy.OutdatedYtDlpHint(
+                RuntimeInformation.IsOSPlatform(OSPlatform.OSX)));
+        }
 
         if (line.Contains("HTTP Error 412", StringComparison.OrdinalIgnoreCase)
             || line.Contains("Precondition Failed", StringComparison.OrdinalIgnoreCase))
@@ -6802,6 +6925,13 @@ public sealed class MainWindow : Window
             }, DispatcherPriority.Background);
         }
 
+        public void ResetForRetry()
+        {
+            OutputPath = null;
+            SetProgress(0, "\u7b49\u5f85\u4e2d");
+            SetState(DownloadState.Queued);
+        }
+
         public void SetProgress(double percent, string label)
         {
             Progress = Math.Clamp(percent, 0, 100);
@@ -6950,23 +7080,24 @@ internal sealed class AppSettings
 
     public static string GetDefaultOutputFolder()
     {
-        var videos = IoPath.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-            "Videos",
-            "Converted");
+        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        var preferred = RuntimeInformation.IsOSPlatform(OSPlatform.OSX)
+            ? IoPath.Combine(home, "Downloads")
+            : IoPath.Combine(home, "Videos", "Converted");
         try
         {
-            Directory.CreateDirectory(videos);
-            return videos;
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX) && Directory.Exists(preferred))
+            {
+                return preferred;
+            }
+
+            Directory.CreateDirectory(preferred);
+            return preferred;
         }
         catch
         {
-            var downloads = IoPath.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-                "Downloads");
-            return Directory.Exists(downloads)
-                ? downloads
-                : Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            var downloads = IoPath.Combine(home, "Downloads");
+            return Directory.Exists(downloads) ? downloads : home;
         }
     }
 
@@ -6989,11 +7120,100 @@ internal static class CookieRetryPolicy
     public static bool ShouldUseAutomaticCookies(
         bool automaticCookiesRequested,
         bool automaticCookiesUnavailable,
-        bool isBilibiliUrl) =>
-        automaticCookiesRequested && !automaticCookiesUnavailable && isBilibiliUrl;
+        bool isBilibiliUrl,
+        bool allowForAnySite = false) =>
+        automaticCookiesRequested && !automaticCookiesUnavailable && (isBilibiliUrl || allowForAnySite);
 
     public static bool ShouldRetryWithoutAutomaticCookies(int exitCode, bool usedAutomaticCookies) =>
         exitCode != 0 && usedAutomaticCookies;
+}
+
+internal static class YoutubeDownloadPolicy
+{
+    public const string StandardExtractorArgs = "youtube:player_client=default,ios,tv,web";
+    public const string FallbackExtractorArgs = "youtube:player_client=ios,tv,web";
+
+    public static bool IsYouTubeUrl(string? url)
+    {
+        if (string.IsNullOrWhiteSpace(url) || !Uri.TryCreate(url, UriKind.Absolute, out var uri))
+        {
+            return false;
+        }
+
+        var host = uri.Host;
+        return host.Contains("youtube.com", StringComparison.OrdinalIgnoreCase)
+            || host.Equals("youtu.be", StringComparison.OrdinalIgnoreCase)
+            || host.Contains("youtube-nocookie.com", StringComparison.OrdinalIgnoreCase);
+    }
+
+    public static string GetMp4FormatSelector(string? mp4Quality)
+    {
+        var maxHeight = (mp4Quality ?? "1080P").ToUpperInvariant() switch
+        {
+            "4K" => 2160,
+            "720P" or "720" => 720,
+            "480P" or "480" => 480,
+            _ => 1080
+        };
+
+        // Prefer H.264 + AAC. AV1/WebM (399+251) is more likely to 403 on YouTube.
+        return $"bestvideo[height<={maxHeight}][vcodec^=avc1]+bestaudio[acodec^=mp4a]/" +
+               $"bestvideo[height<={maxHeight}][ext=mp4]+bestaudio[ext=m4a]/" +
+               $"best[height<={maxHeight}][ext=mp4]/" +
+               $"bestvideo[height<={maxHeight}]+bestaudio/" +
+               $"best[height<={maxHeight}]/best";
+    }
+
+    public static bool LooksLikeHttpForbidden(string? text) =>
+        !string.IsNullOrWhiteSpace(text)
+        && (text.Contains("HTTP Error 403", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("403: Forbidden", StringComparison.OrdinalIgnoreCase));
+
+    public static bool LooksLikeOutdatedYtDlp(string? text) =>
+        !string.IsNullOrWhiteSpace(text)
+        && text.Contains("older than 90 days", StringComparison.OrdinalIgnoreCase);
+
+    public static string OutdatedYtDlpHint(bool isMac) =>
+        isMac
+            ? "yt-dlp \u7248\u672c\u904e\u820a\uff0cYouTube \u5bb9\u6613\u51fa\u73fe 403\u3002\u8acb\u5728\u7d42\u7aef\u6a5f\u57f7\u884c\uff1abrew upgrade yt-dlp"
+            : "yt-dlp \u7248\u672c\u904e\u820a\uff0cYouTube \u5bb9\u6613\u51fa\u73fe 403\u3002\u8acb\u66f4\u65b0 yt-dlp \u5f8c\u518d\u8a66\u3002";
+
+    public static string ForbiddenRetryHint() =>
+        "YouTube \u62d2\u7d55\u4e0b\u8f09\uff08403\uff09\u3002\u6b63\u5728\u6539\u7528\u76f8\u5bb9\u756b\u8cea\u8207\u64ad\u653e\u5668\u5ba2\u6236\u7aef\u91cd\u8a66\u3002";
+
+    public static string ForbiddenGiveUpHint(bool isMac) =>
+        isMac
+            ? "YouTube \u4ecd\u56de\u50b3 403\u3002\u8acb\u57f7\u884c brew upgrade yt-dlp\uff0c\u6216\u532f\u5165\u5df2\u767b\u5165\u7684 cookies.txt \u5f8c\u91cd\u8a66\u3002"
+            : "YouTube \u4ecd\u56de\u50b3 403\u3002\u8acb\u66f4\u65b0 yt-dlp\uff0c\u6216\u532f\u5165\u5df2\u767b\u5165\u7684 cookies.txt \u5f8c\u91cd\u8a66\u3002";
+}
+
+internal static class PlatformCopy
+{
+    public static string UiFontFamily =>
+        RuntimeInformation.IsOSPlatform(OSPlatform.OSX)
+            ? "PingFang TC, PingFang HK, Hiragino Sans GB, SF Pro Text, Inter, sans-serif"
+            : "Microsoft JhengHei UI, Segoe UI, Inter, sans-serif";
+
+    public static string MonoFontFamily =>
+        RuntimeInformation.IsOSPlatform(OSPlatform.OSX)
+            ? "SF Mono, Menlo, PingFang TC, monospace"
+            : "Consolas, Microsoft JhengHei UI, monospace";
+
+    public static string SupportedPlatformsLabel() =>
+        SupportedPlatformsLabel(
+            RuntimeInformation.IsOSPlatform(OSPlatform.OSX)
+                ? "osx"
+                : RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+                    ? "windows"
+                    : "linux");
+
+    public static string SupportedPlatformsLabel(string os) =>
+        os switch
+        {
+            "osx" => "\u7248\u672c\uff1a1.0.0  |  \u652f\u63f4 macOS 12+",
+            "windows" => "\u7248\u672c\uff1a1.0.0  |  \u652f\u63f4 Windows 10/11",
+            _ => "\u7248\u672c\uff1a1.0.0  |  \u652f\u63f4 Linux"
+        };
 }
 
 internal static class BrowserCookieLocator

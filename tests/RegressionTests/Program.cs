@@ -35,8 +35,46 @@ try
             automaticCookiesUnavailable: true,
             isBilibiliUrl: true),
         "A browser cookie source that failed during parsing must stay disabled for downloading");
+    AssertTrue(CookieRetryPolicy.ShouldUseAutomaticCookies(
+            automaticCookiesRequested: true,
+            automaticCookiesUnavailable: false,
+            isBilibiliUrl: false,
+            allowForAnySite: true),
+        "YouTube 403 fallback may use browser cookies");
+
+    AssertTrue(YoutubeDownloadPolicy.IsYouTubeUrl("https://www.youtube.com/watch?v=KDKU-ifLufQ"),
+        "Standard watch URLs are YouTube");
+    AssertTrue(YoutubeDownloadPolicy.IsYouTubeUrl("https://youtu.be/KDKU-ifLufQ"),
+        "youtu.be short links are YouTube");
+    AssertFalse(YoutubeDownloadPolicy.IsYouTubeUrl("https://www.bilibili.com/video/BV1xx411c7mD"),
+        "Bilibili URLs are not YouTube");
+
+    var selector = YoutubeDownloadPolicy.GetMp4FormatSelector("1080P");
+    AssertTrue(selector.Contains("vcodec^=avc1", StringComparison.Ordinal),
+        "1080P selector must prefer H.264 to avoid AV1 403s");
+    AssertTrue(selector.Contains("height<=1080", StringComparison.Ordinal),
+        "1080P selector must cap height");
+    AssertTrue(YoutubeDownloadPolicy.GetMp4FormatSelector("4K").Contains("height<=2160", StringComparison.Ordinal),
+        "4K selector must allow 2160");
+
+    AssertTrue(YoutubeDownloadPolicy.LooksLikeHttpForbidden(
+            "ERROR: unable to download video data: HTTP Error 403: Forbidden"),
+        "yt-dlp 403 lines must trigger a compatibility retry");
+    AssertFalse(YoutubeDownloadPolicy.LooksLikeHttpForbidden("download 100%"),
+        "Successful progress is not a 403");
+    AssertTrue(YoutubeDownloadPolicy.LooksLikeOutdatedYtDlp(
+            "WARNING: Your yt-dlp version (2026.03.17) is older than 90 days!"),
+        "Outdated yt-dlp warning must be recognized");
+    AssertTrue(YoutubeDownloadPolicy.OutdatedYtDlpHint(isMac: true).Contains("brew upgrade yt-dlp", StringComparison.Ordinal),
+        "macOS hint must mention brew upgrade");
+
+    AssertTrue(PlatformCopy.SupportedPlatformsLabel("osx").Contains("macOS", StringComparison.Ordinal),
+        "macOS footer must not say Windows");
+    AssertTrue(PlatformCopy.SupportedPlatformsLabel("windows").Contains("Windows 10/11", StringComparison.Ordinal),
+        "Windows footer keeps the Windows label");
 
     Console.WriteLine("PASS: cookie handling regression tests");
+    Console.WriteLine("PASS: YouTube 403 / Mac copy regression tests");
     return 0;
 }
 finally

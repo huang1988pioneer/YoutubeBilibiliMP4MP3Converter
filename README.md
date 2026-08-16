@@ -54,11 +54,34 @@ Windows ARM：
 powershell -ExecutionPolicy Bypass -File .\build-windows.ps1 -Runtime win-arm64
 ```
 
+## 發佈 Windows / macOS / Linux
+
+```bash
+./build-release.sh
+```
+
+輸出在 `dist/`：
+
+| 檔案 | 平台 |
+|------|------|
+| `YoutubeOrBilibiliMP3Converter-v*-win-x64.zip` | Windows x64 |
+| `YoutubeOrBilibiliMP3Converter-v*-osx-arm64.tar.gz` | macOS Apple Silicon |
+| `YoutubeOrBilibiliMP3Converter-v*-osx-x64.tar.gz` | macOS Intel |
+| `YoutubeOrBilibiliMP3Converter-v*-linux-x64.tar.gz` | Linux x64 |
+
 ## macOS 設定
 
 ```bash
 brew install yt-dlp ffmpeg
 ```
+
+YouTube 若出現 `HTTP Error 403: Forbidden`，多半是 `yt-dlp` 過舊。請先更新：
+
+```bash
+brew upgrade yt-dlp
+```
+
+會員或需登入的影片，請匯出 `cookies.txt` 後在首頁「Cookies 檔案」匯入。
 
 ## 使用方式
 
