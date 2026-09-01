@@ -73,6 +73,7 @@ package_macos() {
   mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
   cp -R "$src"/. "$app/Contents/MacOS/"
   cp "$ROOT/Info.plist" "$app/Contents/Info.plist"
+  cp "$ROOT/Assets/AppIcon.icns" "$app/Contents/Resources/AppIcon.icns"
   chmod +x "$app/Contents/MacOS/${NAME}"
   if command -v codesign >/dev/null 2>&1; then
     codesign --force --deep --sign - "$app" >/dev/null 2>&1 || true

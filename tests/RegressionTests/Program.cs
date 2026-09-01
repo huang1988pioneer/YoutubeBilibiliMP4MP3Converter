@@ -72,9 +72,31 @@ try
         "macOS footer must not say Windows");
     AssertTrue(PlatformCopy.SupportedPlatformsLabel("windows").Contains("Windows 10/11", StringComparison.Ordinal),
         "Windows footer keeps the Windows label");
+    var assemblyVersion = typeof(PlatformCopy).Assembly.GetName().Version;
+    var expectedVersion = assemblyVersion is null
+        ? "1.3.0"
+        : $"{assemblyVersion.Major}.{assemblyVersion.Minor}.{assemblyVersion.Build}";
+    AssertEqual(expectedVersion, PlatformCopy.DisplayVersion,
+        "Footer/title version must come from the assembly");
+    AssertTrue(!string.Equals(PlatformCopy.DisplayVersion, "1.0.0", StringComparison.Ordinal),
+        "Displayed version must not stay frozen at 1.0.0");
+    AssertTrue(PlatformCopy.SupportedPlatformsLabel("osx").Contains(PlatformCopy.DisplayVersion, StringComparison.Ordinal),
+        "macOS footer must show the current assembly version");
+
+    AssertEqual(null, ToolLocator.FindExecutable(""),
+        "Empty tool names must not be treated as executables");
+    AssertEqual(null, ToolLocator.FindExecutable("definitely-not-an-installed-tool-xyz"),
+        "Missing tools must not be cached as a hit");
+    var ytDlp = ToolLocator.FindExecutable("yt-dlp");
+    if (ytDlp is not null)
+    {
+        AssertEqual(ytDlp, ToolLocator.FindExecutable("yt-dlp"),
+            "Successful tool lookups must reuse the cached path");
+    }
 
     Console.WriteLine("PASS: cookie handling regression tests");
     Console.WriteLine("PASS: YouTube 403 / Mac copy regression tests");
+    Console.WriteLine("PASS: version and tool locator tests");
     return 0;
 }
 finally

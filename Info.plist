@@ -11,12 +11,14 @@
   <string>YouTube Bilibili MP3</string>
   <key>CFBundleDisplayName</key>
   <string>YouTube / Bilibili to MP3 Converter</string>
+  <key>CFBundleIconFile</key>
+  <string>AppIcon</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>1.2.16</string>
+  <string>1.3.0</string>
   <key>CFBundleVersion</key>
-  <string>16</string>
+  <string>17</string>
   <key>LSMinimumSystemVersion</key>
   <string>12.0</string>
   <key>NSHighResolutionCapable</key>

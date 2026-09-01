@@ -14,6 +14,7 @@ using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
+using Avalonia.Platform;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using IoPath = System.IO.Path;
@@ -54,6 +55,7 @@ public sealed class MainWindow : Window
     // directory is unavailable. Keep the converter usable and open the original page
     // in the system browser instead of allowing that failure to terminate the app.
     private static readonly bool EmbeddedPreviewEnabled = !RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
+    private static readonly Lazy<Bitmap?> AppIconBitmap = new(LoadAppIcon);
 
     private const int MaxRecentSearches = 12;
 
@@ -164,7 +166,11 @@ public sealed class MainWindow : Window
             _todayDownloads = 0;
         }
 
-        Title = "\u5f71\u97f3\u8f49\u63db\u5927\u5e2b v1.0";
+        Title = $"\u5f71\u97f3\u8f49\u63db\u5927\u5e2b v{PlatformCopy.DisplayVersion}";
+        if (AppIconBitmap.Value is { } appIcon)
+        {
+            Icon = new WindowIcon(appIcon);
+        }
         Width = 1180;
         Height = RuntimeInformation.IsOSPlatform(OSPlatform.OSX) ? 860 : 780;
         MinWidth = 980;
@@ -634,22 +640,7 @@ public sealed class MainWindow : Window
             Spacing = 10,
             Margin = new Thickness(4, 0, 0, 18)
         };
-        brand.Children.Add(new Border
-        {
-            Width = 34,
-            Height = 34,
-            CornerRadius = new CornerRadius(10),
-            Background = RedYouTube,
-            Child = new TextBlock
-            {
-                Text = ">",
-                FontSize = 16,
-                FontWeight = FontWeight.Bold,
-                Foreground = Brushes.White,
-                HorizontalAlignment = HorizontalAlignment.Center,
-                VerticalAlignment = VerticalAlignment.Center
-            }
-        });
+        brand.Children.Add(CreateAppIconView(34, 10));
         var brandText = new StackPanel { Spacing = 0, VerticalAlignment = VerticalAlignment.Center };
         brandText.Children.Add(new TextBlock
         {
@@ -660,7 +651,7 @@ public sealed class MainWindow : Window
         });
         brandText.Children.Add(new TextBlock
         {
-            Text = "v1.0",
+            Text = $"v{PlatformCopy.DisplayVersion}",
             FontSize = 11,
             Foreground = TextMuted
         });
@@ -692,32 +683,7 @@ public sealed class MainWindow : Window
                 Spacing = 6,
                 Children =
                 {
-                    new Border
-                    {
-                        Width = 64,
-                        Height = 64,
-                        CornerRadius = new CornerRadius(32),
-                        Background = new LinearGradientBrush
-                        {
-                            StartPoint = new RelativePoint(0, 0, RelativeUnit.Relative),
-                            EndPoint = new RelativePoint(1, 1, RelativeUnit.Relative),
-                            GradientStops =
-                            {
-                                new GradientStop(Color.Parse("#FFD08A"), 0),
-                                new GradientStop(Color.Parse("#F8B4C4"), 1)
-                            }
-                        },
-                        HorizontalAlignment = HorizontalAlignment.Center,
-                        Child = new TextBlock
-                        {
-                            Text = "YT",
-                            FontSize = 18,
-                            FontWeight = FontWeight.Bold,
-                            Foreground = Brushes.White,
-                            HorizontalAlignment = HorizontalAlignment.Center,
-                            VerticalAlignment = VerticalAlignment.Center
-                        }
-                    },
+                    CreateAppIconView(72, 20),
                     new TextBlock
                     {
                         Text = "YouTube / Bilibili",
@@ -1460,6 +1426,59 @@ public sealed class MainWindow : Window
         settingsBtn.VerticalAlignment = VerticalAlignment.Top;
         row.Children.Add(settingsBtn);
         return row;
+    }
+
+    private static Bitmap? LoadAppIcon()
+    {
+        try
+        {
+            using var stream = AssetLoader.Open(new Uri("avares://YoutubeOrBilibiliMP3Converter/Assets/app-icon.png"));
+            return new Bitmap(stream);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static Control CreateAppIconView(double size, double radius)
+    {
+        if (AppIconBitmap.Value is { } bitmap)
+        {
+            return new Border
+            {
+                Width = size,
+                Height = size,
+                CornerRadius = new CornerRadius(radius),
+                ClipToBounds = true,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                Child = new Image
+                {
+                    Source = bitmap,
+                    Width = size,
+                    Height = size,
+                    Stretch = Stretch.UniformToFill
+                }
+            };
+        }
+
+        return new Border
+        {
+            Width = size,
+            Height = size,
+            CornerRadius = new CornerRadius(radius),
+            Background = RedYouTube,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            Child = new TextBlock
+            {
+                Text = ">",
+                FontSize = Math.Max(12, size * 0.45),
+                FontWeight = FontWeight.Bold,
+                Foreground = Brushes.White,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center
+            }
+        };
     }
 
     private static TextBlock ColoredWord(string text, IBrush color, double size, FontWeight weight) => new()
@@ -2856,13 +2875,15 @@ public sealed class MainWindow : Window
     {
         try
         {
-            using var http = CreateSearchHttpClient();
-            if (!isYouTube)
+            var resolvedUrl = NormalizeThumbnailUrl(thumbnailUrl);
+            if (string.IsNullOrWhiteSpace(resolvedUrl))
             {
-                http.DefaultRequestHeaders.TryAddWithoutValidation("Referer", "https://www.bilibili.com/");
+                return;
             }
 
-            var bytes = await http.GetByteArrayAsync(NormalizeThumbnailUrl(thumbnailUrl));
+            var bytes = await AppHttp.GetBytesAsync(
+                resolvedUrl,
+                isYouTube ? null : "https://www.bilibili.com/");
             using var ms = new MemoryStream(bytes);
             var bitmap = new Bitmap(ms);
             await Dispatcher.UIThread.InvokeAsync(() =>
@@ -2977,11 +2998,11 @@ public sealed class MainWindow : Window
             + $"&page_size={pageSize}"
             + "&order=totalrank";
 
-        using var http = CreateSearchHttpClient();
-        http.DefaultRequestHeaders.TryAddWithoutValidation("Referer", "https://search.bilibili.com");
-        http.DefaultRequestHeaders.TryAddWithoutValidation("Origin", "https://search.bilibili.com");
-
-        using var response = await http.GetAsync(url, token);
+        using var request = AppHttp.CreateGet(
+            url,
+            referer: "https://search.bilibili.com",
+            origin: "https://search.bilibili.com");
+        using var response = await AppHttp.Shared.SendAsync(request, token);
         var body = await response.Content.ReadAsStringAsync(token);
         if (!response.IsSuccessStatusCode)
         {
@@ -3272,24 +3293,6 @@ public sealed class MainWindow : Window
             ThumbnailUrl: NormalizeThumbnailUrl(thumb),
             VideoId: id,
             Description: description);
-    }
-
-    private static HttpClient CreateSearchHttpClient()
-    {
-        var http = new HttpClient
-        {
-            Timeout = TimeSpan.FromSeconds(25)
-        };
-        http.DefaultRequestHeaders.TryAddWithoutValidation(
-            "User-Agent",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36");
-        http.DefaultRequestHeaders.TryAddWithoutValidation(
-            "Accept",
-            "application/json, text/plain, */*");
-        http.DefaultRequestHeaders.TryAddWithoutValidation(
-            "Accept-Language",
-            "zh-CN,zh-TW;q=0.9,zh;q=0.8,en;q=0.7");
-        return http;
     }
 
     private static string? NormalizeThumbnailUrl(string? url)
@@ -4705,16 +4708,10 @@ public sealed class MainWindow : Window
 
         try
         {
-            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(20) };
-            http.DefaultRequestHeaders.TryAddWithoutValidation(
-                "User-Agent",
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36");
-            if (_parsedInfo is not null && IsBilibiliVideoUrl(_parsedInfo.Url))
-            {
-                http.DefaultRequestHeaders.TryAddWithoutValidation("Referer", "https://www.bilibili.com/");
-            }
-
-            var bytes = await http.GetByteArrayAsync(thumbnailUrl);
+            var referer = _parsedInfo is not null && IsBilibiliVideoUrl(_parsedInfo.Url)
+                ? "https://www.bilibili.com/"
+                : null;
+            var bytes = await AppHttp.GetBytesAsync(thumbnailUrl, referer);
             if (version != _thumbnailLoadVersion)
             {
                 return;
@@ -6951,437 +6948,5 @@ public sealed class MainWindow : Window
                 }
             }, DispatcherPriority.Background);
         }
-    }
-}
-
-internal sealed class RecentSearchSetting
-{
-    public string Query { get; set; } = "";
-    public string Platform { get; set; } = "both";
-    public DateTime? SearchedAtUtc { get; set; }
-}
-
-internal sealed class AppSettings
-{
-    private static readonly string SettingsDirectory = IoPath.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-        "YoutubeOrBilibiliMP3Converter");
-
-    private static readonly string LegacySettingsPath = IoPath.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-        "YoutubeToMP3Converter",
-        "settings.json");
-
-    private static readonly string SettingsPath = IoPath.Combine(SettingsDirectory, "settings.json");
-
-    public string LastOutputFolder { get; init; } = GetDefaultOutputFolder();
-    public int UrlInputCount { get; init; } = 1;
-    public string OutputFormat { get; init; } = "MP4";
-    public string Mp4Quality { get; init; } = "1080P";
-    public bool? IncludeSubtitles { get; init; } = false;
-    public bool? DownloadPlaylist { get; init; } = false;
-    public int TodayDownloadCount { get; init; }
-    public DateOnly TodayDate { get; init; } = DateOnly.FromDateTime(DateTime.Now);
-    public string? CookieFilePath { get; init; }
-    public List<RecentSearchSetting>? RecentSearches { get; init; }
-
-    public static AppSettings Load()
-    {
-        try
-        {
-            var path = File.Exists(SettingsPath) ? SettingsPath : LegacySettingsPath;
-            if (File.Exists(path))
-            {
-                var settings = JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(path));
-                if (settings is not null)
-                {
-                    var today = DateOnly.FromDateTime(DateTime.Now);
-                    var recent = (settings.RecentSearches ?? [])
-                        .Where(e => !string.IsNullOrWhiteSpace(e.Query))
-                        .GroupBy(e => (
-                            Query: e.Query.Trim().ToLowerInvariant(),
-                            Platform: (e.Platform ?? "both").Trim().ToLowerInvariant()))
-                        .Select(g => g.OrderByDescending(x => x.SearchedAtUtc ?? DateTime.MinValue).First())
-                        .OrderByDescending(e => e.SearchedAtUtc ?? DateTime.MinValue)
-                        .Take(12)
-                        .Select(e => new RecentSearchSetting
-                        {
-                            Query = e.Query.Trim(),
-                            Platform = e.Platform ?? "both",
-                            SearchedAtUtc = e.SearchedAtUtc
-                        })
-                        .ToList();
-
-                    return new AppSettings
-                    {
-                        LastOutputFolder = Directory.Exists(settings.LastOutputFolder)
-                            ? settings.LastOutputFolder
-                            : GetDefaultOutputFolder(),
-                        UrlInputCount = settings.UrlInputCount is 1 or 3 or 7 ? settings.UrlInputCount : 1,
-                        OutputFormat = string.Equals(settings.OutputFormat, "MP3", StringComparison.OrdinalIgnoreCase) ? "MP3" : "MP4",
-                        Mp4Quality = NormalizeQuality(settings.Mp4Quality),
-                        // Missing property in older settings.json => default off.
-                        IncludeSubtitles = settings.IncludeSubtitles ?? false,
-                        DownloadPlaylist = settings.DownloadPlaylist ?? false,
-                        TodayDownloadCount = settings.TodayDate == today ? settings.TodayDownloadCount : 0,
-                        TodayDate = today,
-                        CookieFilePath = !string.IsNullOrEmpty(settings.CookieFilePath) && File.Exists(settings.CookieFilePath)
-                            ? settings.CookieFilePath
-                            : null,
-                        RecentSearches = recent
-                    };
-                }
-            }
-        }
-        catch
-        {
-            // Invalid settings should not stop the app from opening.
-        }
-
-        return new AppSettings();
-    }
-
-    public static void Save(
-        string outputFolder,
-        int urlInputCount,
-        string outputFormat,
-        string mp4Quality,
-        int todayDownloadCount = 0,
-        DateOnly? todayDate = null,
-        bool includeSubtitles = false,
-        string? cookieFilePath = null,
-        bool downloadPlaylist = false,
-        IReadOnlyList<RecentSearchSetting>? recentSearches = null)
-    {
-        try
-        {
-            Directory.CreateDirectory(SettingsDirectory);
-            var settings = new AppSettings
-            {
-                LastOutputFolder = outputFolder,
-                UrlInputCount = urlInputCount,
-                OutputFormat = string.Equals(outputFormat, "MP3", StringComparison.OrdinalIgnoreCase) ? "MP3" : "MP4",
-                Mp4Quality = NormalizeQuality(mp4Quality),
-                IncludeSubtitles = includeSubtitles,
-                DownloadPlaylist = downloadPlaylist,
-                TodayDownloadCount = todayDownloadCount,
-                TodayDate = todayDate ?? DateOnly.FromDateTime(DateTime.Now),
-                CookieFilePath = cookieFilePath,
-                RecentSearches = recentSearches?.Take(12).ToList() ?? []
-            };
-            var json = JsonSerializer.Serialize(settings, new JsonSerializerOptions { WriteIndented = true });
-            File.WriteAllText(SettingsPath, json);
-        }
-        catch
-        {
-            // Preferences are best-effort.
-        }
-    }
-
-    public static string GetDefaultOutputFolder()
-    {
-        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        var preferred = RuntimeInformation.IsOSPlatform(OSPlatform.OSX)
-            ? IoPath.Combine(home, "Downloads")
-            : IoPath.Combine(home, "Videos", "Converted");
-        try
-        {
-            if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX) && Directory.Exists(preferred))
-            {
-                return preferred;
-            }
-
-            Directory.CreateDirectory(preferred);
-            return preferred;
-        }
-        catch
-        {
-            var downloads = IoPath.Combine(home, "Downloads");
-            return Directory.Exists(downloads) ? downloads : home;
-        }
-    }
-
-    private static string NormalizeQuality(string? quality)
-    {
-        var q = (quality ?? "1080P").ToUpperInvariant();
-        return q switch
-        {
-            "4K" => "4K",
-            "480P" or "480" => "480P",
-            "720P" or "720" => "720P",
-            "1080P" or "1080" => "1080P",
-            _ => "1080P"
-        };
-    }
-}
-
-internal static class CookieRetryPolicy
-{
-    public static bool ShouldUseAutomaticCookies(
-        bool automaticCookiesRequested,
-        bool automaticCookiesUnavailable,
-        bool isBilibiliUrl,
-        bool allowForAnySite = false) =>
-        automaticCookiesRequested && !automaticCookiesUnavailable && (isBilibiliUrl || allowForAnySite);
-
-    public static bool ShouldRetryWithoutAutomaticCookies(int exitCode, bool usedAutomaticCookies) =>
-        exitCode != 0 && usedAutomaticCookies;
-}
-
-internal static class YoutubeDownloadPolicy
-{
-    public const string StandardExtractorArgs = "youtube:player_client=default,ios,tv,web";
-    public const string FallbackExtractorArgs = "youtube:player_client=ios,tv,web";
-
-    public static bool IsYouTubeUrl(string? url)
-    {
-        if (string.IsNullOrWhiteSpace(url) || !Uri.TryCreate(url, UriKind.Absolute, out var uri))
-        {
-            return false;
-        }
-
-        var host = uri.Host;
-        return host.Contains("youtube.com", StringComparison.OrdinalIgnoreCase)
-            || host.Equals("youtu.be", StringComparison.OrdinalIgnoreCase)
-            || host.Contains("youtube-nocookie.com", StringComparison.OrdinalIgnoreCase);
-    }
-
-    public static string GetMp4FormatSelector(string? mp4Quality)
-    {
-        var maxHeight = (mp4Quality ?? "1080P").ToUpperInvariant() switch
-        {
-            "4K" => 2160,
-            "720P" or "720" => 720,
-            "480P" or "480" => 480,
-            _ => 1080
-        };
-
-        // Prefer H.264 + AAC. AV1/WebM (399+251) is more likely to 403 on YouTube.
-        return $"bestvideo[height<={maxHeight}][vcodec^=avc1]+bestaudio[acodec^=mp4a]/" +
-               $"bestvideo[height<={maxHeight}][ext=mp4]+bestaudio[ext=m4a]/" +
-               $"best[height<={maxHeight}][ext=mp4]/" +
-               $"bestvideo[height<={maxHeight}]+bestaudio/" +
-               $"best[height<={maxHeight}]/best";
-    }
-
-    public static bool LooksLikeHttpForbidden(string? text) =>
-        !string.IsNullOrWhiteSpace(text)
-        && (text.Contains("HTTP Error 403", StringComparison.OrdinalIgnoreCase)
-            || text.Contains("403: Forbidden", StringComparison.OrdinalIgnoreCase));
-
-    public static bool LooksLikeOutdatedYtDlp(string? text) =>
-        !string.IsNullOrWhiteSpace(text)
-        && text.Contains("older than 90 days", StringComparison.OrdinalIgnoreCase);
-
-    public static string OutdatedYtDlpHint(bool isMac) =>
-        isMac
-            ? "yt-dlp \u7248\u672c\u904e\u820a\uff0cYouTube \u5bb9\u6613\u51fa\u73fe 403\u3002\u8acb\u5728\u7d42\u7aef\u6a5f\u57f7\u884c\uff1abrew upgrade yt-dlp"
-            : "yt-dlp \u7248\u672c\u904e\u820a\uff0cYouTube \u5bb9\u6613\u51fa\u73fe 403\u3002\u8acb\u66f4\u65b0 yt-dlp \u5f8c\u518d\u8a66\u3002";
-
-    public static string ForbiddenRetryHint() =>
-        "YouTube \u62d2\u7d55\u4e0b\u8f09\uff08403\uff09\u3002\u6b63\u5728\u6539\u7528\u76f8\u5bb9\u756b\u8cea\u8207\u64ad\u653e\u5668\u5ba2\u6236\u7aef\u91cd\u8a66\u3002";
-
-    public static string ForbiddenGiveUpHint(bool isMac) =>
-        isMac
-            ? "YouTube \u4ecd\u56de\u50b3 403\u3002\u8acb\u57f7\u884c brew upgrade yt-dlp\uff0c\u6216\u532f\u5165\u5df2\u767b\u5165\u7684 cookies.txt \u5f8c\u91cd\u8a66\u3002"
-            : "YouTube \u4ecd\u56de\u50b3 403\u3002\u8acb\u66f4\u65b0 yt-dlp\uff0c\u6216\u532f\u5165\u5df2\u767b\u5165\u7684 cookies.txt \u5f8c\u91cd\u8a66\u3002";
-}
-
-internal static class PlatformCopy
-{
-    public static string UiFontFamily =>
-        RuntimeInformation.IsOSPlatform(OSPlatform.OSX)
-            ? "PingFang TC, PingFang HK, Hiragino Sans GB, SF Pro Text, Inter, sans-serif"
-            : "Microsoft JhengHei UI, Segoe UI, Inter, sans-serif";
-
-    public static string MonoFontFamily =>
-        RuntimeInformation.IsOSPlatform(OSPlatform.OSX)
-            ? "SF Mono, Menlo, PingFang TC, monospace"
-            : "Consolas, Microsoft JhengHei UI, monospace";
-
-    public static string SupportedPlatformsLabel() =>
-        SupportedPlatformsLabel(
-            RuntimeInformation.IsOSPlatform(OSPlatform.OSX)
-                ? "osx"
-                : RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
-                    ? "windows"
-                    : "linux");
-
-    public static string SupportedPlatformsLabel(string os) =>
-        os switch
-        {
-            "osx" => "\u7248\u672c\uff1a1.0.0  |  \u652f\u63f4 macOS 12+",
-            "windows" => "\u7248\u672c\uff1a1.0.0  |  \u652f\u63f4 Windows 10/11",
-            _ => "\u7248\u672c\uff1a1.0.0  |  \u652f\u63f4 Linux"
-        };
-}
-
-internal static class BrowserCookieLocator
-{
-    public static string? FindWindowsBrowser(string localAppData, string roamingAppData)
-    {
-        var chromeRoot = IoPath.Combine(localAppData, "Google", "Chrome", "User Data");
-        if (HasChromiumCookies(chromeRoot))
-        {
-            return "chrome";
-        }
-
-        var edgeRoot = IoPath.Combine(localAppData, "Microsoft", "Edge", "User Data");
-        if (HasChromiumCookies(edgeRoot))
-        {
-            return "edge";
-        }
-
-        var firefoxRoot = IoPath.Combine(roamingAppData, "Mozilla", "Firefox", "Profiles");
-        if (HasFirefoxCookies(firefoxRoot))
-        {
-            return "firefox";
-        }
-
-        return null;
-    }
-
-    public static string? FindMacBrowser(string userProfile)
-    {
-        var appSupport = IoPath.Combine(userProfile, "Library", "Application Support");
-        if (HasFirefoxCookies(IoPath.Combine(appSupport, "Firefox", "Profiles")))
-        {
-            return "firefox";
-        }
-
-        if (HasChromiumCookies(IoPath.Combine(appSupport, "Google", "Chrome")))
-        {
-            return "chrome";
-        }
-
-        if (File.Exists(IoPath.Combine(userProfile, "Library", "Cookies", "Cookies.binarycookies")))
-        {
-            return "safari";
-        }
-
-        return null;
-    }
-
-    private static bool HasChromiumCookies(string userDataRoot)
-    {
-        try
-        {
-            if (!Directory.Exists(userDataRoot))
-            {
-                return false;
-            }
-
-            return Directory.EnumerateDirectories(userDataRoot)
-                .Where(path =>
-                {
-                    var name = IoPath.GetFileName(path);
-                    return name.Equals("Default", StringComparison.OrdinalIgnoreCase)
-                        || name.StartsWith("Profile ", StringComparison.OrdinalIgnoreCase);
-                })
-                .Any(path =>
-                    File.Exists(IoPath.Combine(path, "Network", "Cookies"))
-                    || File.Exists(IoPath.Combine(path, "Cookies")));
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
-    private static bool HasFirefoxCookies(string profilesRoot)
-    {
-        try
-        {
-            return Directory.Exists(profilesRoot)
-                && Directory.EnumerateFiles(profilesRoot, "cookies.sqlite", SearchOption.AllDirectories).Any();
-        }
-        catch
-        {
-            return false;
-        }
-    }
-}
-
-internal static class ToolLocator
-{
-    private static readonly string[] UnixSearchPaths =
-    [
-        "/opt/homebrew/bin",
-        "/usr/local/bin",
-        "/usr/bin",
-        "/bin"
-    ];
-
-    public static string? FindExecutable(string name)
-    {
-        var executableNames = GetExecutableNames(name);
-        var searchPaths = GetSearchPaths();
-
-        foreach (var path in searchPaths)
-        {
-            foreach (var executableName in executableNames)
-            {
-                var candidate = IoPath.Combine(path, executableName);
-                if (File.Exists(candidate) && !Directory.Exists(candidate))
-                {
-                    return candidate;
-                }
-            }
-        }
-
-        return null;
-    }
-
-    public static void PrependToPath(IDictionary<string, string?> environment, params string[] executablePaths)
-    {
-        var directories = executablePaths
-            .Select(IoPath.GetDirectoryName)
-            .Where(path => !string.IsNullOrWhiteSpace(path))
-            .Cast<string>()
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToArray();
-
-        if (directories.Length == 0)
-        {
-            return;
-        }
-
-        var existingPath = environment.TryGetValue("PATH", out var path)
-            ? path
-            : Environment.GetEnvironmentVariable("PATH");
-
-        environment["PATH"] = string.Join(IoPath.PathSeparator, directories.Concat(
-            (existingPath ?? "").Split(IoPath.PathSeparator, StringSplitOptions.RemoveEmptyEntries)));
-    }
-
-    private static IEnumerable<string> GetExecutableNames(string name)
-    {
-        yield return name;
-
-        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows) || IoPath.HasExtension(name))
-        {
-            yield break;
-        }
-
-        var extensions = (Environment.GetEnvironmentVariable("PATHEXT") ?? ".COM;.EXE;.BAT;.CMD")
-            .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-
-        foreach (var extension in extensions)
-        {
-            yield return $"{name}{extension.ToLowerInvariant()}";
-        }
-    }
-
-    private static IEnumerable<string> GetSearchPaths()
-    {
-        IEnumerable<string> paths = (Environment.GetEnvironmentVariable("PATH") ?? "")
-            .Split(IoPath.PathSeparator, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-
-        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-        {
-            paths = paths.Concat(UnixSearchPaths);
-        }
-
-        return paths.Distinct(StringComparer.OrdinalIgnoreCase);
     }
 }
