@@ -21,6 +21,20 @@ Avalonia 桌面應用：將 **YouTube** 或 **Bilibili** 影片網址轉換成 *
 dotnet run
 ```
 
+## 下載（GitHub Releases）
+
+| 檔案 | 平台 | 說明 |
+|------|------|------|
+| `…-win-x64.exe` | Windows x64 | 單一執行檔，下載後直接執行 |
+| `…-osx-arm64.dmg` | macOS Apple Silicon | 開啟後把 App 拖進「應用程式」 |
+| `…-osx-x64.dmg` | macOS Intel | 同上 |
+| `…-linux-x64` | Linux x64 | 單一執行檔（`chmod +x` 後執行） |
+| `….zip` / `….tar.gz` | 各平台 | 資料夾版，內容與上面相同 |
+
+macOS 版未經 Apple 公證，第一次開啟若被擋，請在 App 上按右鍵 →「打開」。
+
+建置全部發佈檔：`./build-release.sh`（輸出到 `dist/`）。
+
 ## 安裝配套工具（yt-dlp + ffmpeg）
 
 程式啟動時若偵測到缺少工具，首頁會顯示「開始使用前：安裝配套工具」卡片：

@@ -61,6 +61,69 @@ publish_rid() {
     -o "$out"
 }
 
+# Single-file build: one executable with the runtime and native libraries embedded.
+publish_single() {
+  local rid="$1"
+  local out="$STAGE/single/$rid"
+  echo "==> publish single-file $rid"
+  dotnet publish \
+    -c Release \
+    -r "$rid" \
+    --self-contained true \
+    -p:PublishSingleFile=true \
+    -p:IncludeNativeLibrariesForSelfExtract=true \
+    -p:EnableCompressionInSingleFile=true \
+    -p:UsedAvaloniaProducts= \
+    -p:DebugType=None \
+    -p:DebugSymbols=false \
+    -o "$out"
+}
+
+package_single_windows() {
+  local rid="$1"
+  local exe_name="${NAME}-v${VERSION}-${rid}.exe"
+  cp "$STAGE/single/$rid/${NAME}.exe" "$DIST/$exe_name"
+  echo "created $DIST/$exe_name"
+}
+
+package_single_linux() {
+  local rid="$1"
+  local bin_name="${NAME}-v${VERSION}-${rid}"
+  cp "$STAGE/single/$rid/${NAME}" "$DIST/$bin_name"
+  chmod +x "$DIST/$bin_name"
+  echo "created $DIST/$bin_name"
+}
+
+# macOS disk image: .app (single-file executable inside) + Applications shortcut.
+package_dmg() {
+  local rid="$1"
+  local dmg_name="${NAME}-v${VERSION}-${rid}.dmg"
+  local root="$STAGE/dmg/$rid"
+  local app="$root/${NAME}.app"
+  rm -rf "$root"
+  mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+  # macOS single-file publish keeps native dylibs (Skia, HarfBuzz, AvaloniaNative)
+  # beside the executable, so ship them inside the bundle.
+  cp -R "$STAGE/single/$rid"/. "$app/Contents/MacOS/"
+  find "$app/Contents/MacOS" -name "*.pdb" -delete
+  cp "$ROOT/Info.plist" "$app/Contents/Info.plist"
+  cp "$ROOT/Assets/AppIcon.icns" "$app/Contents/Resources/AppIcon.icns"
+  chmod +x "$app/Contents/MacOS/${NAME}"
+  if command -v codesign >/dev/null 2>&1; then
+    codesign --force --deep --sign - "$app" >/dev/null 2>&1 || true
+  fi
+  ln -s /Applications "$root/Applications"
+  write_usage "$root/README.txt" "macOS"
+  hdiutil create \
+    -volname "影音轉換大師 ${VERSION}" \
+    -srcfolder "$root" \
+    -fs HFS+ \
+    -format UDZO \
+    -ov \
+    "$DIST/$dmg_name" >/dev/null
+  echo "created $DIST/$dmg_name"
+}
+
 package_windows() {
   local rid="$1"
   local zip_name="${NAME}-v${VERSION}-${rid}.zip"
@@ -121,9 +184,19 @@ package_macos osx-arm64
 package_macos osx-x64
 package_linux linux-x64
 
+publish_single win-x64
+publish_single osx-arm64
+publish_single osx-x64
+publish_single linux-x64
+
+package_single_windows win-x64
+package_single_linux linux-x64
+package_dmg osx-arm64
+package_dmg osx-x64
+
 (
   cd "$DIST"
-  shasum -a 256 *.zip *.tar.gz > SHA256SUMS.txt
+  shasum -a 256 *.zip *.tar.gz *.exe *.dmg "${NAME}-v${VERSION}-linux-x64" > SHA256SUMS.txt
 )
 
 echo
