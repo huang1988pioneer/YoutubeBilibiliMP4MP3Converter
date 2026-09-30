@@ -1,8 +1,8 @@
-# 影音轉換大師 v1.3.0
+# 影音轉換大師 v1.4.0
 
 Avalonia 桌面應用：將 **YouTube** 或 **Bilibili** 影片網址轉換成 **MP4 / MP3**（本機使用 `yt-dlp` + `ffmpeg`）。
 
-介面依「影音轉換大師」設計稿實作：側邊導覽、網址解析、格式選擇、下載清單與即時進度。
+介面依「影音轉換大師」設計稿實作：單頁式版面，網址解析、格式選擇、下載清單與即時進度，其餘功能收在可折疊區塊。
 
 ## 功能
 
@@ -13,12 +13,26 @@ Avalonia 桌面應用：將 **YouTube** 或 **Bilibili** 影片網址轉換成 *
 - 輸出格式：MP4（480P / 720P / 1080P / 4K）或 MP3
 - 下載清單：進度、速度、完成 / 失敗狀態
 - **字幕搭配**（預設關閉）：可選下載中文優先字幕為外掛 `.srt`；MP4 並內嵌字幕軌；MP3 另產生 `.lrc` 歌詞檔
-- 側邊欄：首頁、搜尋影片、下載中、已完成、音樂提取、檔案管理、歷史記錄
+- 折疊式區塊（預設收合）：搜尋影片、下載中、已完成、檔案管理、歷史記錄、我的最愛
 
 ## 執行
 
 ```bash
 dotnet run
+```
+
+## 安裝配套工具（yt-dlp + ffmpeg）
+
+程式啟動時若偵測到缺少工具，首頁會顯示「開始使用前：安裝配套工具」卡片：
+
+- **一鍵安裝**：macOS 會開啟「終端機」自動安裝（沒有 Homebrew 時會先安裝 Homebrew）；Windows 會以系統管理員身分開啟 PowerShell 執行 winget。
+- **複製指令**：想自己操作時，複製後貼到終端機執行。
+- **重新檢查**：安裝完成後回到程式即會自動偵測，不需重啟。
+
+macOS 手動安裝：
+
+```bash
+brew install yt-dlp ffmpeg
 ```
 
 ## Windows 使用前安裝
@@ -86,7 +100,7 @@ brew upgrade yt-dlp
 ## 使用方式
 
 1. 貼上影片網址（或按「貼上」從剪貼簿匯入）  
-   也可從側邊欄「搜尋影片」以關鍵字搜尋 YouTube / Bilibili，再點「使用網址」「解析預覽」或「開始轉換」
+   也可展開「搜尋影片」區塊以關鍵字搜尋 YouTube / Bilibili，再點「使用網址」「解析預覽」或「開始轉換」
 2. 按「解析網址」預覽影片資訊（可選）
 3. 選擇 MP4 或 MP3，MP4 可選畫質
 4. 確認儲存位置
@@ -113,3 +127,13 @@ https://www.bilibili.com/video/BV158dfBAEbH/
 https://www.bilibili.com/video/BV15hdfBaECr/
 https://www.bilibili.com/video/BV1q4dfBNE8X/
 ```
+
+## App 圖示
+
+圖示以向量繪製，原始碼在 `tools/IconGen`。修改後重新產生 `Assets/AppIcon.icns`、`Assets/app-icon.png`、`Assets/app.ico`：
+
+```bash
+cd tools/IconGen && dotnet run -- out full && iconutil -c icns out/AppIcon.iconset -o ../../Assets/AppIcon.icns && cp out/app-icon.png out/app.ico ../../Assets/
+```
+
+舊版貓咪圖示可從 v1.3.0 取回（`git show v1.3.0:Assets/app-icon.png`）。

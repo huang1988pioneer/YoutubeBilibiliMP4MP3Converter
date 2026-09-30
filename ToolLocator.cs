@@ -106,6 +106,19 @@ internal static class ToolLocator
         {
             paths = paths.Concat(UnixSearchPaths);
         }
+        else
+        {
+            // Tools installed by winget while the app is running only appear in the
+            // registry PATH, so re-read it to avoid forcing a restart.
+            var freshPaths = new[] { EnvironmentVariableTarget.User, EnvironmentVariableTarget.Machine }
+                .SelectMany(target => (Environment.GetEnvironmentVariable("PATH", target) ?? "")
+                    .Split(IoPath.PathSeparator, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                .Select(Environment.ExpandEnvironmentVariables);
+            var wingetLinks = IoPath.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "Microsoft", "WinGet", "Links");
+            paths = paths.Concat(freshPaths).Append(wingetLinks);
+        }
 
         return paths.Distinct(StringComparer.OrdinalIgnoreCase);
     }

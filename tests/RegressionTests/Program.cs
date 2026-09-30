@@ -74,7 +74,7 @@ try
         "Windows footer keeps the Windows label");
     var assemblyVersion = typeof(PlatformCopy).Assembly.GetName().Version;
     var expectedVersion = assemblyVersion is null
-        ? "1.3.0"
+        ? "1.4.0"
         : $"{assemblyVersion.Major}.{assemblyVersion.Minor}.{assemblyVersion.Build}";
     AssertEqual(expectedVersion, PlatformCopy.DisplayVersion,
         "Footer/title version must come from the assembly");
@@ -94,9 +94,30 @@ try
             "Successful tool lookups must reuse the cached path");
     }
 
+    AssertEqual("brew install yt-dlp ffmpeg", ToolSetupGuide.GetInstallCommand("osx", hasHomebrew: true),
+        "macOS with Homebrew installs both tools via brew");
+    AssertTrue(ToolSetupGuide.GetInstallCommand("osx", hasHomebrew: false).StartsWith(ToolSetupGuide.HomebrewInstallCommand, StringComparison.Ordinal),
+        "macOS without Homebrew must install Homebrew first");
+    AssertEqual("winget install yt-dlp.yt-dlp Gyan.FFmpeg", ToolSetupGuide.GetInstallCommand("windows", hasHomebrew: false),
+        "Windows guide matches the README winget command");
+    AssertTrue(ToolSetupGuide.SupportsOneClickInstall("osx") && ToolSetupGuide.SupportsOneClickInstall("windows"),
+        "macOS and Windows offer one-click install");
+    AssertFalse(ToolSetupGuide.SupportsOneClickInstall("linux"),
+        "Linux only shows a copyable command");
+    foreach (var os in new[] { "osx", "windows", "linux" })
+    {
+        AssertTrue(ToolSetupGuide.GetSteps(os, hasHomebrew: false).Length > 0, $"{os} install guide needs steps");
+    }
+    var macScript = ToolSetupGuide.BuildMacInstallScript();
+    AssertTrue(macScript.StartsWith("#!/bin/zsh", StringComparison.Ordinal),
+        "macOS installer script must be runnable by Terminal");
+    AssertTrue(macScript.Contains("brew install yt-dlp ffmpeg", StringComparison.Ordinal),
+        "macOS installer script installs both tools");
+
     Console.WriteLine("PASS: cookie handling regression tests");
     Console.WriteLine("PASS: YouTube 403 / Mac copy regression tests");
     Console.WriteLine("PASS: version and tool locator tests");
+    Console.WriteLine("PASS: tool setup guide tests");
     return 0;
 }
 finally

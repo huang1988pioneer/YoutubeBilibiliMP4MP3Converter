@@ -38,7 +38,6 @@ public sealed class MainWindow : Window
     ];
 
     private static readonly IBrush BgApp = Brush.Parse("#EEF4FB");
-    private static readonly IBrush BgSidebar = Brush.Parse("#F5F9FF");
     private static readonly IBrush BgCard = Brush.Parse("#FFFFFF");
     private static readonly IBrush BorderSoft = Brush.Parse("#D7E4F5");
     private static readonly IBrush TextPrimary = Brush.Parse("#1A2332");
@@ -59,7 +58,9 @@ public sealed class MainWindow : Window
 
     private const int MaxRecentSearches = 12;
 
-    private readonly List<NavItem> _navItems = [];
+    private readonly Dictionary<string, CollapsibleSection> _sections = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _expandedSections = new(StringComparer.Ordinal);
+    private ScrollViewer? _mainScroll;
     private readonly List<DownloadItemView> _downloadItems = [];
     private readonly List<SearchVideoResult> _searchResults = [];
     private readonly List<RecentSearchEntry> _recentSearches = [];
@@ -102,6 +103,9 @@ public sealed class MainWindow : Window
     private readonly TextBlock _queueCountText;
     private readonly TextBlock _statusText;
     private readonly Border _parseErrorPanel;
+    private readonly Border _toolSetupPanel;
+    private readonly StackPanel _toolSetupBody;
+    private bool _toolsMissing;
     private readonly TextBlock _parseErrorText;
     private readonly TextBlock _footerStats;
     private readonly TextBox _logText;
@@ -120,7 +124,6 @@ public sealed class MainWindow : Window
     private string _mp4Quality = "1080P";
     private bool _includeSubtitles = false;
     private bool _downloadPlaylist = false;
-    private string _activeNav = "home";
     private string _searchPlatform = "both";
     private int _searchResultLimit = 12;
     private int _todayDownloads;
@@ -286,8 +289,8 @@ public sealed class MainWindow : Window
         {
             ItemsSource = Mp4QualityOptions,
             SelectedItem = _mp4Quality,
-            MinWidth = 120,
-            MinHeight = 34,
+            MinWidth = 110,
+            MinHeight = 32,
             FontSize = 13
         };
         _qualityCombo.SelectionChanged += (_, _) =>
@@ -311,11 +314,12 @@ public sealed class MainWindow : Window
         _convertButton = new Button
         {
             Content = "\u958b\u59cb\u8f49\u63db",
-            MinHeight = 44,
-            FontSize = 16,
+            MinHeight = 40,
+            FontSize = 15,
             FontWeight = FontWeight.SemiBold,
             Foreground = Brushes.White,
             Background = Green,
+            HorizontalContentAlignment = HorizontalAlignment.Center,
             CornerRadius = new CornerRadius(12),
             HorizontalAlignment = HorizontalAlignment.Stretch,
             Cursor = new Cursor(StandardCursorType.Hand),
@@ -349,7 +353,7 @@ public sealed class MainWindow : Window
             IsChecked = _includeSubtitles,
             FontSize = 13,
             Foreground = TextPrimary,
-            Margin = new Thickness(0, 2, 0, 0)
+            MinHeight = 24
         };
         _subtitleCheckBox.IsCheckedChanged += (_, _) =>
         {
@@ -366,7 +370,7 @@ public sealed class MainWindow : Window
             IsChecked = _downloadPlaylist,
             FontSize = 13,
             Foreground = TextPrimary,
-            Margin = new Thickness(0, 2, 0, 0)
+            MinHeight = 24
         };
         _playlistCheckBox.IsCheckedChanged += (_, _) =>
         {
@@ -385,11 +389,10 @@ public sealed class MainWindow : Window
             FontSize = 12,
             Foreground = string.IsNullOrEmpty(_cookiesFilePath) ? TextMuted : TextPrimary,
             VerticalAlignment = VerticalAlignment.Center,
-            TextTrimming = TextTrimming.CharacterEllipsis,
-            MaxWidth = 180
+            TextTrimming = TextTrimming.CharacterEllipsis
         };
 
-        _cookiesBrowseButton = CreateSoftButton("\u532f\u5165", 72);
+        _cookiesBrowseButton = CreateSoftButton("\u532f\u5165 cookies.txt", 72);
         _cookiesBrowseButton.Click += ChooseCookiesFileAsync;
 
         _cookiesClearButton = CreateSoftButton("\u6e05\u9664", 72);
@@ -493,7 +496,7 @@ public sealed class MainWindow : Window
         };
         _previewPlayerHost = new Border
         {
-            Height = RuntimeInformation.IsOSPlatform(OSPlatform.OSX) ? 168 : 200,
+            Height = 180,
             MinHeight = 140,
             CornerRadius = new CornerRadius(12),
             ClipToBounds = true,
@@ -553,6 +556,17 @@ public sealed class MainWindow : Window
             Padding = new Thickness(12, 10),
             Child = parseErrorBody
         };
+        _toolSetupBody = new StackPanel { Spacing = 8 };
+        _toolSetupPanel = new Border
+        {
+            IsVisible = false,
+            Background = Brush.Parse("#FFFBEB"),
+            BorderBrush = Brush.Parse("#FCD34D"),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(14),
+            Padding = new Thickness(14, 12),
+            Child = _toolSetupBody
+        };
         _footerStats = new TextBlock
         {
             Text = BuildFooterStats(),
@@ -577,11 +591,19 @@ public sealed class MainWindow : Window
             MinHeight = 100
         };
         _downloadListPanel = new StackPanel { Spacing = 10 };
-        _mainHost = new StackPanel { Spacing = 14 };
+        _mainHost = new StackPanel { Spacing = 10 };
 
         Content = BuildShell();
         SetOutputFormat(_outputFormat);
         Opened += (_, _) => CheckTools();
+        // Users install tools in another window; re-detect when they come back.
+        Activated += (_, _) =>
+        {
+            if (_toolsMissing)
+            {
+                RefreshToolSetup();
+            }
+        };
         Closing += (_, _) => StopEmbeddedPreview(clearStatus: false);
     }
 
@@ -589,239 +611,165 @@ public sealed class MainWindow : Window
     {
         var root = new Grid
         {
-            RowDefinitions = new RowDefinitions("*,Auto"),
-            ColumnDefinitions = new ColumnDefinitions("200,*")
+            RowDefinitions = new RowDefinitions("*,Auto")
         };
-
-        var sidebar = BuildSidebar();
-        Grid.SetRowSpan(sidebar, 2);
-        root.Children.Add(sidebar);
 
         var main = new Border
         {
             Background = BgApp,
             Padding = RuntimeInformation.IsOSPlatform(OSPlatform.OSX)
-                ? new Thickness(20, 12, 20, 8)
-                : new Thickness(22, 18, 22, 12),
-            Child = new ScrollViewer
+                ? new Thickness(16, 10, 16, 8)
+                : new Thickness(18, 12, 18, 10),
+            Child = _mainScroll = new ScrollViewer
             {
                 Content = _mainHost,
                 VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
                 HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled
             }
         };
-        Grid.SetColumn(main, 1);
         root.Children.Add(main);
 
         var footer = BuildFooter();
         Grid.SetRow(footer, 1);
-        Grid.SetColumn(footer, 1);
         root.Children.Add(footer);
 
         ShowHomePage();
         return root;
     }
 
-    private Control BuildSidebar()
+    private Control BuildSectionsPanel()
     {
-        var panel = new Border
-        {
-            Background = BgSidebar,
-            BorderBrush = BorderSoft,
-            BorderThickness = new Thickness(0, 0, 1, 0),
-            Padding = new Thickness(14, 18, 14, 16)
-        };
-
-        var stack = new StackPanel { Spacing = 8 };
-
-        var brand = new StackPanel
-        {
-            Orientation = Orientation.Horizontal,
-            Spacing = 10,
-            Margin = new Thickness(4, 0, 0, 18)
-        };
-        brand.Children.Add(CreateAppIconView(34, 10));
-        var brandText = new StackPanel { Spacing = 0, VerticalAlignment = VerticalAlignment.Center };
-        brandText.Children.Add(new TextBlock
-        {
-            Text = "\u5f71\u97f3\u8f49\u63db\u5927\u5e2b",
-            FontSize = 14,
-            FontWeight = FontWeight.Bold,
-            Foreground = TextPrimary
-        });
-        brandText.Children.Add(new TextBlock
-        {
-            Text = $"v{PlatformCopy.DisplayVersion}",
-            FontSize = 11,
-            Foreground = TextMuted
-        });
-        brand.Children.Add(brandText);
-        stack.Children.Add(brand);
-
-        stack.Children.Add(CreateNav("home", "\u9996\u9801"));
-        stack.Children.Add(CreateNav("search", "\u641c\u5c0b\u5f71\u7247"));
-        stack.Children.Add(CreateNav("parse", "\u7db2\u5740\u89e3\u6790"));
-        stack.Children.Add(CreateNav("downloading", "\u4e0b\u8f09\u4e2d"));
-        stack.Children.Add(CreateNav("done", "\u5df2\u5b8c\u6210"));
-        stack.Children.Add(CreateNav("audio", "\u97f3\u6a02\u63d0\u53d6"));
-        stack.Children.Add(CreateNav("files", "\u6a94\u6848\u7ba1\u7406"));
-        stack.Children.Add(CreateNav("history", "\u6b77\u53f2\u8a18\u9304"));
-        stack.Children.Add(CreateNav("fav", "\u6211\u7684\u6700\u611b"));
-
-        stack.Children.Add(new Border { Height = 1, Background = BorderSoft, Margin = new Thickness(4, 12) });
-
-        var mascot = new Border
-        {
-            Background = Brush.Parse("#FFFFFF"),
-            BorderBrush = BorderSoft,
-            BorderThickness = new Thickness(1),
-            CornerRadius = new CornerRadius(14),
-            Padding = new Thickness(12),
-            Margin = new Thickness(0, 4, 0, 0),
-            Child = new StackPanel
+        _sections.Clear();
+        var panel = new StackPanel { Spacing = 8 };
+        panel.Children.Add(CreateSection("search", "\u641c\u5c0b\u5f71\u7247",
+            "\u641c\u5c0b YouTube \u6216 Bilibili\uff0c\u9ede\u9078\u7d50\u679c\u5373\u53ef\u89e3\u6790\u6216\u8f49\u63db",
+            BuildSearchSectionContent, rebuildOnExpand: false));
+        panel.Children.Add(CreateSection("downloading", "\u4e0b\u8f09\u4e2d", "\u76ee\u524d\u9032\u884c\u4e2d\u7684\u8f49\u63db\u4efb\u52d9",
+            () => BuildQueueSectionContent("downloading"), rebuildOnExpand: true));
+        panel.Children.Add(CreateSection("done", "\u5df2\u5b8c\u6210", "\u5df2\u6210\u529f\u5b8c\u6210\u7684\u6a94\u6848",
+            () => BuildQueueSectionContent("done"), rebuildOnExpand: true));
+        panel.Children.Add(CreateSection("files", "\u6a94\u6848\u7ba1\u7406", "\u958b\u555f\u8f38\u51fa\u8cc7\u6599\u593e\uff0c\u7ba1\u7406\u5df2\u8f49\u63db\u7684\u6a94\u6848",
+            BuildFilesSectionContent, rebuildOnExpand: true));
+        panel.Children.Add(CreateSection("history", "\u6b77\u53f2\u8a18\u9304", "\u6240\u6709\u8f49\u63db\u7d00\u9304",
+            () => BuildQueueSectionContent("history"), rebuildOnExpand: true));
+        panel.Children.Add(CreateSection("fav", "\u6211\u7684\u6700\u611b", "\u6536\u85cf\u5e38\u7528\u5f71\u7247\u8207\u64ad\u653e\u6e05\u55ae",
+            () => new TextBlock
             {
-                Spacing = 6,
-                Children =
-                {
-                    CreateAppIconView(72, 20),
-                    new TextBlock
-                    {
-                        Text = "YouTube / Bilibili",
-                        FontSize = 11,
-                        Foreground = TextMuted,
-                        HorizontalAlignment = HorizontalAlignment.Center
-                    },
-                    new TextBlock
-                    {
-                        Text = "\u5b89\u5fc3\u8f49\u63db \u00b7 \u672c\u6a5f\u8655\u7406",
-                        FontSize = 11,
-                        Foreground = TextSecondary,
-                        HorizontalAlignment = HorizontalAlignment.Center
-                    }
-                }
-            }
-        };
-        stack.Children.Add(mascot);
-
-        var dock = new DockPanel();
-        var bottomHint = new TextBlock
-        {
-            Text = "\u5b89\u5168\u7121\u6bd2 \u00b7 \u672c\u6a5f\u8f49\u6a94",
-            FontSize = 10,
-            Foreground = TextMuted,
-            HorizontalAlignment = HorizontalAlignment.Center,
-            Margin = new Thickness(0, 8, 0, 0)
-        };
-        DockPanel.SetDock(bottomHint, Dock.Bottom);
-        dock.Children.Add(bottomHint);
-        dock.Children.Add(stack);
-        panel.Child = dock;
+                Text = "\u4e4b\u5f8c\u53ef\u6536\u85cf\u5e38\u7528\u5f71\u7247\u8207\u64ad\u653e\u6e05\u55ae\u3002",
+                FontSize = 13,
+                Foreground = TextMuted
+            }, rebuildOnExpand: false));
+        RefreshSectionHeaders();
         return panel;
     }
 
-    private Control CreateNav(string id, string label)
+    /// <summary>
+    /// Collapsible block replacing a former sidebar page. Collapsed by default;
+    /// the open/closed state survives home rebuilds within a session.
+    /// </summary>
+    private Control CreateSection(string id, string title, string subtitle, Func<Control> buildContent, bool rebuildOnExpand)
     {
-        var isActive = id == _activeNav;
-        var border = new Border
+        var titleText = new TextBlock
         {
-            Background = isActive ? Blue : Brushes.Transparent,
-            CornerRadius = new CornerRadius(12),
-            Padding = new Thickness(12, 10),
-            Cursor = new Cursor(StandardCursorType.Hand),
-            Tag = id
+            Text = title,
+            FontSize = 15,
+            FontWeight = FontWeight.SemiBold,
+            Foreground = TextPrimary
         };
-
-        var content = new StackPanel
+        var header = new StackPanel { Spacing = 2 };
+        header.Children.Add(titleText);
+        header.Children.Add(new TextBlock
         {
-            Orientation = Orientation.Horizontal,
-            Spacing = 10
+            Text = subtitle,
+            FontSize = 12,
+            Foreground = TextMuted,
+            TextWrapping = TextWrapping.Wrap
+        });
+
+        var expanded = _expandedSections.Contains(id);
+        var expander = new Expander
+        {
+            Header = header,
+            IsExpanded = expanded,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            HorizontalContentAlignment = HorizontalAlignment.Stretch,
+            Background = BgCard,
+            BorderBrush = BorderSoft,
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(14),
+            Padding = new Thickness(14, 10)
         };
-        content.Children.Add(new Ellipse
+        if (!rebuildOnExpand || expanded)
         {
-            Width = 8,
-            Height = 8,
-            Fill = isActive ? Brushes.White : Blue,
-            VerticalAlignment = VerticalAlignment.Center
-        });
-        content.Children.Add(new TextBlock
-        {
-            Text = label,
-            FontSize = 13,
-            FontWeight = isActive ? FontWeight.SemiBold : FontWeight.Normal,
-            Foreground = isActive ? Brushes.White : TextPrimary,
-            VerticalAlignment = VerticalAlignment.Center
-        });
-        border.Child = content;
+            expander.Content = buildContent();
+        }
 
-        border.PointerEntered += (_, _) =>
+        expander.PropertyChanged += (_, e) =>
         {
-            if ((string?)border.Tag != _activeNav)
+            if (e.Property != Expander.IsExpandedProperty)
             {
-                border.Background = BlueSoft;
+                return;
+            }
+
+            if (expander.IsExpanded)
+            {
+                _expandedSections.Add(id);
+                if (rebuildOnExpand)
+                {
+                    expander.Content = buildContent();
+                }
+            }
+            else
+            {
+                _expandedSections.Remove(id);
             }
         };
-        border.PointerExited += (_, _) =>
+
+        _sections[id] = new CollapsibleSection(expander, titleText, title, buildContent, rebuildOnExpand);
+        return expander;
+    }
+
+    private void OpenSection(string id)
+    {
+        if (!_sections.TryGetValue(id, out var section))
         {
-            if ((string?)border.Tag != _activeNav)
+            return;
+        }
+
+        section.Expander.IsExpanded = true;
+        Dispatcher.UIThread.Post(() => section.Expander.BringIntoView(), DispatcherPriority.Background);
+    }
+
+    /// <summary>Refreshes counts in section headers and the content of open queue sections.</summary>
+    private void RefreshQueueSections()
+    {
+        Dispatcher.UIThread.Post(() =>
+        {
+            RefreshSectionHeaders();
+            foreach (var id in new[] { "downloading", "done", "history" })
             {
-                border.Background = Brushes.Transparent;
+                if (_sections.TryGetValue(id, out var section) && section.Expander.IsExpanded)
+                {
+                    section.Expander.Content = section.BuildContent();
+                }
             }
-        };
-        // Defer navigation so we never rebuild the visual tree mid-pointer event.
-        border.PointerPressed += (_, _) => ScheduleNavigate(id);
-
-        _navItems.Add(new NavItem(id, border));
-        return border;
+        }, DispatcherPriority.Background);
     }
 
-    private void ScheduleNavigate(string id)
+    private void RefreshSectionHeaders()
     {
-        Dispatcher.UIThread.Post(() => Navigate(id), DispatcherPriority.Background);
-    }
-
-    private void Navigate(string id)
-    {
-        try
+        foreach (var id in new[] { "downloading", "done", "history" })
         {
-            UpdateNavHighlight(id);
-
-            switch (id)
+            if (_sections.TryGetValue(id, out var section))
             {
-                case "home":
-                case "parse":
-                    ShowHomePage();
-                    break;
-                case "search":
-                    ShowSearchPage();
-                    break;
-                case "downloading":
-                    ShowQueuePage(onlyActive: true);
-                    break;
-                case "done":
-                    ShowQueuePage(onlyDone: true);
-                    break;
-                case "audio":
-                    SetOutputFormat("MP3");
-                    ShowHomePage();
-                    SetStatus("\u5df2\u5207\u63db\u5230\u97f3\u6a02\u63d0\u53d6\uff08MP3\uff09");
-                    break;
-                case "files":
-                    ShowFilesPage();
-                    break;
-                case "history":
-                    ShowQueuePage();
-                    break;
-                case "fav":
-                    ShowPlaceholder("\u6211\u7684\u6700\u611b", "\u4e4b\u5f8c\u53ef\u6536\u85cf\u5e38\u7528\u5f71\u7247\u8207\u64ad\u653e\u6e05\u55ae\u3002");
-                    break;
+                var count = _downloadItems.Count(item => MatchesQueueFilter(item, id));
+                section.TitleText.Text = count > 0 ? $"{section.Title} ({count})" : section.Title;
             }
         }
-        catch (Exception ex)
-        {
-            AppendLog($"\u5c0e\u89bd\u5931\u6557 ({id}): {ex}");
-            SetStatus("\u5207\u63db\u9801\u9762\u5931\u6557\uff0c\u8acb\u91cd\u8a66");
-        }
     }
+
+    private void ScrollToTop() =>
+        Dispatcher.UIThread.Post(() => _mainScroll?.ScrollToHome(), DispatcherPriority.Background);
 
     private void ShowHomePage()
     {
@@ -831,72 +779,115 @@ public sealed class MainWindow : Window
         RebuildMainHost(() =>
         {
             _mainHost.Children.Add(BuildHeader());
+            _mainHost.Children.Add(_toolSetupPanel);
             _mainHost.Children.Add(BuildUrlCard());
             _mainHost.Children.Add(BuildOptionsAndPreviewRow());
             _mainHost.Children.Add(BuildQueueAndUtilsRow());
+            _mainHost.Children.Add(BuildSectionsPanel());
             _mainHost.Children.Add(BuildLogCard());
             RebuildDownloadList();
         });
     }
 
-    private void ShowQueuePage(bool onlyActive = false, bool onlyDone = false)
-    {
-        // Pause embedded media when leaving the home/preview surface.
-        StopEmbeddedPreview(clearStatus: false);
-        RebuildMainHost(() =>
+    private static bool MatchesQueueFilter(DownloadItemView item, string sectionId) =>
+        sectionId switch
         {
-            var title = onlyActive
-                ? "\u4e0b\u8f09\u4e2d"
-                : onlyDone
-                    ? "\u5df2\u5b8c\u6210"
-                    : "\u6b77\u53f2\u8a18\u9304";
-            var subtitle = onlyActive
-                ? "\u76ee\u524d\u9032\u884c\u4e2d\u7684\u8f49\u63db\u4efb\u52d9"
-                : onlyDone
-                    ? "\u5df2\u6210\u529f\u5b8c\u6210\u7684\u6a94\u6848"
-                    : "\u6240\u6709\u8f49\u63db\u7d00\u9304";
-            _mainHost.Children.Add(SectionTitle(title, subtitle));
+            "downloading" => item.State is DownloadState.Queued or DownloadState.Running or DownloadState.Paused,
+            "done" => item.State == DownloadState.Completed,
+            _ => true
+        };
 
-            var filtered = _downloadItems.Where(item =>
+    private Control BuildQueueSectionContent(string sectionId)
+    {
+        var filtered = _downloadItems.Where(item => MatchesQueueFilter(item, sectionId)).Reverse().ToList();
+        if (filtered.Count == 0)
+        {
+            return new TextBlock
             {
-                if (onlyActive)
-                {
-                    return item.State is DownloadState.Queued or DownloadState.Running or DownloadState.Paused;
-                }
+                Text = "\u76ee\u524d\u6c92\u6709\u9805\u76ee\u3002\u5f9e\u4e0a\u65b9\u8cbc\u4e0a\u7db2\u5740\u4e26\u958b\u59cb\u8f49\u63db\u3002",
+                FontSize = 13,
+                Foreground = TextMuted,
+                TextWrapping = TextWrapping.Wrap
+            };
+        }
 
-                if (onlyDone)
-                {
-                    return item.State == DownloadState.Completed;
-                }
+        // Download rows (item.Root) already live in the queue card above, and a control
+        // can only have one parent, so sections show a compact summary row instead.
+        var list = new StackPanel { Spacing = 8 };
+        foreach (var item in filtered)
+        {
+            list.Children.Add(BuildQueueSummaryRow(item));
+        }
 
-                return true;
-            }).ToList();
-
-            if (filtered.Count == 0)
-            {
-                _mainHost.Children.Add(EmptyState(
-                    "\u76ee\u524d\u6c92\u6709\u9805\u76ee",
-                    "\u5f9e\u9996\u9801\u8cbc\u4e0a\u7db2\u5740\u4e26\u958b\u59cb\u8f49\u63db\u3002"));
-                return;
-            }
-
-            var list = new StackPanel { Spacing = 10 };
-            foreach (var item in filtered)
-            {
-                DetachFromParent(item.Root);
-                list.Children.Add(item.Root);
-            }
-
-            _mainHost.Children.Add(Card(list));
-        });
+        return list;
     }
 
-    private void ShowFilesPage()
+    private Control BuildQueueSummaryRow(DownloadItemView item)
     {
-        StopEmbeddedPreview(clearStatus: false);
-        RebuildMainHost(() =>
+        var row = new Grid
         {
-        _mainHost.Children.Add(SectionTitle("\u6a94\u6848\u7ba1\u7406", "\u958b\u555f\u8f38\u51fa\u8cc7\u6599\u593e\uff0c\u7ba1\u7406\u5df2\u8f49\u63db\u7684\u6a94\u6848"));
+            ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto,Auto"),
+            ColumnSpacing = 8
+        };
+
+        var info = new StackPanel { Spacing = 2, VerticalAlignment = VerticalAlignment.Center };
+        info.Children.Add(new TextBlock
+        {
+            Text = item.Title,
+            FontSize = 13,
+            Foreground = TextPrimary,
+            TextTrimming = TextTrimming.CharacterEllipsis
+        });
+        var meta = item.Format == "MP4" ? $"{item.Format} \u00b7 {item.Quality}" : item.Format;
+        if (item.State == DownloadState.Running)
+        {
+            meta += $" \u00b7 {item.Progress:0}%";
+        }
+        info.Children.Add(new TextBlock { Text = meta, FontSize = 11, Foreground = TextMuted });
+        row.Children.Add(info);
+
+        var (stateText, stateBrush) = item.State switch
+        {
+            DownloadState.Running => ("\u4e0b\u8f09\u4e2d", Blue),
+            DownloadState.Completed => ("\u5b8c\u6210", Green),
+            DownloadState.Failed => ("\u5931\u6557", Brush.Parse("#EF4444")),
+            DownloadState.Cancelled => ("\u53d6\u6d88", TextMuted),
+            DownloadState.Paused => ("\u66ab\u505c", Brush.Parse("#F59E0B")),
+            _ => ("\u6392\u968a", Blue)
+        };
+        var badge = new TextBlock
+        {
+            Text = stateText,
+            FontSize = 12,
+            FontWeight = FontWeight.SemiBold,
+            Foreground = stateBrush,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        Grid.SetColumn(badge, 1);
+        row.Children.Add(badge);
+
+        var hasFile = item.State == DownloadState.Completed
+            && !string.IsNullOrWhiteSpace(item.OutputPath)
+            && File.Exists(item.OutputPath);
+        if (hasFile)
+        {
+            var openBtn = CreateSoftButton("\u958b\u555f\u6a94\u6848", 90);
+            openBtn.MinHeight = 32;
+            openBtn.Click += (_, _) => OpenMediaFile(item.OutputPath, item.Format);
+            Grid.SetColumn(openBtn, 2);
+            row.Children.Add(openBtn);
+            var revealBtn = CreateSoftButton("\u5728\u8cc7\u6599\u593e", 90);
+            revealBtn.MinHeight = 32;
+            revealBtn.Click += (_, _) => RevealInFolder(item.OutputPath);
+            Grid.SetColumn(revealBtn, 3);
+            row.Children.Add(revealBtn);
+        }
+
+        return row;
+    }
+
+    private Control BuildFilesSectionContent()
+    {
         var path = _outputBox.Text?.Trim() ?? "";
         var panel = new StackPanel { Spacing = 12 };
         panel.Children.Add(new TextBlock
@@ -965,130 +956,125 @@ public sealed class MainWindow : Window
             }
         }
 
-        _mainHost.Children.Add(Card(panel));
-        });
+        return panel;
     }
 
-    private void ShowSearchPage()
+    private Control BuildSearchSectionContent()
     {
-        StopEmbeddedPreview(clearStatus: false);
-        RebuildMainHost(() =>
+        var content = new StackPanel { Spacing = 12 };
+
+        var form = new StackPanel { Spacing = 12 };
+
+        form.Children.Add(new TextBlock
         {
-            _mainHost.Children.Add(SectionTitle(
-                "\u641c\u5c0b\u5f71\u7247",
-                "\u641c\u5c0b YouTube \u6216 Bilibili\uff0c\u9ede\u9078\u7d50\u679c\u5373\u53ef\u89e3\u6790\u6216\u8f49\u63db"));
-
-            var form = new StackPanel { Spacing = 12 };
-
-            form.Children.Add(new TextBlock
-            {
-                Text = "\u95dc\u9375\u5b57",
-                FontSize = 13,
-                FontWeight = FontWeight.SemiBold,
-                Foreground = TextPrimary
-            });
-
-            var searchRow = new Grid
-            {
-                ColumnDefinitions = new ColumnDefinitions("*,Auto"),
-                ColumnSpacing = 10
-            };
-            searchRow.Children.Add(_searchBox);
-            Grid.SetColumn(_searchButton, 1);
-            searchRow.Children.Add(_searchButton);
-            form.Children.Add(searchRow);
-
-            var filterRow = new Grid
-            {
-                ColumnDefinitions = new ColumnDefinitions("Auto,Auto,Auto,Auto,*"),
-                ColumnSpacing = 10
-            };
-            filterRow.Children.Add(new TextBlock
-            {
-                Text = "\u5e73\u53f0",
-                FontSize = 13,
-                Foreground = TextSecondary,
-                VerticalAlignment = VerticalAlignment.Center
-            });
-            Grid.SetColumn(_searchPlatformCombo, 1);
-            filterRow.Children.Add(_searchPlatformCombo);
-            var countLabel = new TextBlock
-            {
-                Text = "\u6bcf\u5e73\u53f0\u7d50\u679c\u6578",
-                FontSize = 13,
-                Foreground = TextSecondary,
-                VerticalAlignment = VerticalAlignment.Center,
-                Margin = new Thickness(8, 0, 0, 0)
-            };
-            Grid.SetColumn(countLabel, 2);
-            filterRow.Children.Add(countLabel);
-            Grid.SetColumn(_searchCountCombo, 3);
-            filterRow.Children.Add(_searchCountCombo);
-            form.Children.Add(filterRow);
-
-            form.Children.Add(_searchStatusText);
-
-            var chips = new StackPanel
-            {
-                Orientation = Orientation.Horizontal,
-                Spacing = 8
-            };
-            chips.Children.Add(PlatformChip("YouTube", RedYouTube, Brush.Parse("#FFECEC")));
-            chips.Children.Add(PlatformChip("bilibili", PinkBili, PinkBiliSoft));
-            chips.Children.Add(new TextBlock
-            {
-                Text = "YouTube \u7d93 yt-dlp\uff1bBilibili \u7d93\u5b98\u65b9\u641c\u5c0b API",
-                FontSize = 11,
-                Foreground = TextMuted,
-                VerticalAlignment = VerticalAlignment.Center,
-                Margin = new Thickness(6, 0, 0, 0)
-            });
-            form.Children.Add(chips);
-
-            // Recent search history
-            var historyHeader = new Grid
-            {
-                ColumnDefinitions = new ColumnDefinitions("*,Auto"),
-                Margin = new Thickness(0, 6, 0, 0)
-            };
-            historyHeader.Children.Add(new TextBlock
-            {
-                Text = "\u6700\u8fd1\u641c\u5c0b\u7d00\u9304",
-                FontSize = 13,
-                FontWeight = FontWeight.SemiBold,
-                Foreground = TextPrimary,
-                VerticalAlignment = VerticalAlignment.Center
-            });
-            Grid.SetColumn(_clearSearchHistoryButton, 1);
-            historyHeader.Children.Add(_clearSearchHistoryButton);
-            form.Children.Add(historyHeader);
-            form.Children.Add(_searchHistoryPanel);
-            RebuildSearchHistoryPanel();
-
-            _mainHost.Children.Add(Card(form));
-
-            var resultsBody = new StackPanel { Spacing = 10 };
-            resultsBody.Children.Add(new TextBlock
-            {
-                Text = "\u641c\u5c0b\u7d50\u679c",
-                FontSize = 14,
-                FontWeight = FontWeight.SemiBold,
-                Foreground = TextPrimary
-            });
-            resultsBody.Children.Add(_searchResultsPanel);
-            if (_searchResultsPanel.Children.Count == 0)
-            {
-                _searchResultsPanel.Children.Add(new TextBlock
-                {
-                    Text = "\u5c1a\u7121\u7d50\u679c\u3002\u8f38\u5165\u95dc\u9375\u5b57\u5f8c\u6309\u300c\u641c\u5c0b\u5f71\u7247\u300d\u3002",
-                    FontSize = 13,
-                    Foreground = TextMuted,
-                    Margin = new Thickness(0, 4, 0, 0)
-                });
-            }
-
-            _mainHost.Children.Add(Card(resultsBody));
+            Text = "\u95dc\u9375\u5b57",
+            FontSize = 13,
+            FontWeight = FontWeight.SemiBold,
+            Foreground = TextPrimary
         });
+
+        var searchRow = new Grid
+        {
+            ColumnDefinitions = new ColumnDefinitions("*,Auto"),
+            ColumnSpacing = 10
+        };
+        searchRow.Children.Add(_searchBox);
+        Grid.SetColumn(_searchButton, 1);
+        searchRow.Children.Add(_searchButton);
+        form.Children.Add(searchRow);
+
+        var filterRow = new Grid
+        {
+            ColumnDefinitions = new ColumnDefinitions("Auto,Auto,Auto,Auto,*"),
+            ColumnSpacing = 10
+        };
+        filterRow.Children.Add(new TextBlock
+        {
+            Text = "\u5e73\u53f0",
+            FontSize = 13,
+            Foreground = TextSecondary,
+            VerticalAlignment = VerticalAlignment.Center
+        });
+        Grid.SetColumn(_searchPlatformCombo, 1);
+        filterRow.Children.Add(_searchPlatformCombo);
+        var countLabel = new TextBlock
+        {
+            Text = "\u6bcf\u5e73\u53f0\u7d50\u679c\u6578",
+            FontSize = 13,
+            Foreground = TextSecondary,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(8, 0, 0, 0)
+        };
+        Grid.SetColumn(countLabel, 2);
+        filterRow.Children.Add(countLabel);
+        Grid.SetColumn(_searchCountCombo, 3);
+        filterRow.Children.Add(_searchCountCombo);
+        form.Children.Add(filterRow);
+
+        form.Children.Add(_searchStatusText);
+
+        var chips = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 8
+        };
+        chips.Children.Add(PlatformChip("YouTube", RedYouTube, Brush.Parse("#FFECEC")));
+        chips.Children.Add(PlatformChip("bilibili", PinkBili, PinkBiliSoft));
+        chips.Children.Add(new TextBlock
+        {
+            Text = "YouTube \u7d93 yt-dlp\uff1bBilibili \u7d93\u5b98\u65b9\u641c\u5c0b API",
+            FontSize = 11,
+            Foreground = TextMuted,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(6, 0, 0, 0)
+        });
+        form.Children.Add(chips);
+
+        // Recent search history
+        var historyHeader = new Grid
+        {
+            ColumnDefinitions = new ColumnDefinitions("*,Auto"),
+            Margin = new Thickness(0, 6, 0, 0)
+        };
+        historyHeader.Children.Add(new TextBlock
+        {
+            Text = "\u6700\u8fd1\u641c\u5c0b\u7d00\u9304",
+            FontSize = 13,
+            FontWeight = FontWeight.SemiBold,
+            Foreground = TextPrimary,
+            VerticalAlignment = VerticalAlignment.Center
+        });
+        Grid.SetColumn(_clearSearchHistoryButton, 1);
+        historyHeader.Children.Add(_clearSearchHistoryButton);
+        form.Children.Add(historyHeader);
+        form.Children.Add(_searchHistoryPanel);
+        RebuildSearchHistoryPanel();
+
+        content.Children.Add(form);
+
+        var resultsBody = new StackPanel { Spacing = 10 };
+        resultsBody.Children.Add(new TextBlock
+        {
+            Text = "\u641c\u5c0b\u7d50\u679c",
+            FontSize = 14,
+            FontWeight = FontWeight.SemiBold,
+            Foreground = TextPrimary
+        });
+        resultsBody.Children.Add(_searchResultsPanel);
+        if (_searchResultsPanel.Children.Count == 0)
+        {
+            _searchResultsPanel.Children.Add(new TextBlock
+            {
+                Text = "\u5c1a\u7121\u7d50\u679c\u3002\u8f38\u5165\u95dc\u9375\u5b57\u5f8c\u6309\u300c\u641c\u5c0b\u5f71\u7247\u300d\u3002",
+                FontSize = 13,
+                Foreground = TextMuted,
+                Margin = new Thickness(0, 4, 0, 0)
+            });
+        }
+
+        content.Children.Add(new Border { Height = 1, Background = BorderSoft, Margin = new Thickness(0, 4) });
+        content.Children.Add(resultsBody);
+        return content;
     }
 
     private void OpenOutputFolder(string? path)
@@ -1256,16 +1242,6 @@ public sealed class MainWindow : Window
         && (formatHint.Contains("MP3", StringComparison.OrdinalIgnoreCase)
             || formatHint.EndsWith(".mp3", StringComparison.OrdinalIgnoreCase));
 
-    private void ShowPlaceholder(string title, string message)
-    {
-        StopEmbeddedPreview(clearStatus: false);
-        RebuildMainHost(() =>
-        {
-            _mainHost.Children.Add(SectionTitle(title, message));
-            _mainHost.Children.Add(EmptyState(title, message));
-        });
-    }
-
     /// <summary>
     /// Clears and rebuilds the main content host. On platforms where embedded
     /// WebView is enabled, reparenting is wrapped so the native view survives
@@ -1367,6 +1343,8 @@ public sealed class MainWindow : Window
         DetachFromParent(_browseButton);
         DetachFromParent(_convertButton);
         DetachFromParent(_statusText);
+        DetachFromParent(_parseErrorPanel);
+        DetachFromParent(_toolSetupPanel);
         DetachFromParent(_previewCard);
         DetachFromParent(_queueCountText);
         DetachFromParent(_clearQueueButton);
@@ -1390,40 +1368,35 @@ public sealed class MainWindow : Window
 
     private Control BuildHeader()
     {
-        var row = new Grid
-        {
-            ColumnDefinitions = new ColumnDefinitions("*,Auto"),
-            Margin = new Thickness(0, 0, 0, 4)
-        };
+        var row = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto") };
 
-        var left = new StackPanel { Spacing = 4 };
-        var titlePanel = new WrapPanel { Orientation = Orientation.Horizontal };
-        titlePanel.Children.Add(ColoredWord("YouTube", RedYouTube, 22, FontWeight.Bold));
-        titlePanel.Children.Add(ColoredWord(" / ", TextPrimary, 22, FontWeight.Bold));
-        titlePanel.Children.Add(ColoredWord("Bilibili", PinkBili, 22, FontWeight.Bold));
-        titlePanel.Children.Add(ColoredWord(" \u5f71\u7247\u8f49 ", TextPrimary, 22, FontWeight.Bold));
-        titlePanel.Children.Add(ColoredWord("MP4", Blue, 22, FontWeight.Bold));
-        titlePanel.Children.Add(ColoredWord(" / ", TextPrimary, 22, FontWeight.Bold));
-        titlePanel.Children.Add(ColoredWord("MP3", Green, 22, FontWeight.Bold));
-
-        left.Children.Add(titlePanel);
-        left.Children.Add(new TextBlock
+        var titlePanel = new WrapPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+        titlePanel.Children.Add(ColoredWord("YouTube", RedYouTube, 20, FontWeight.Bold));
+        titlePanel.Children.Add(ColoredWord(" / ", TextPrimary, 20, FontWeight.Bold));
+        titlePanel.Children.Add(ColoredWord("Bilibili", PinkBili, 20, FontWeight.Bold));
+        titlePanel.Children.Add(ColoredWord(" \u5f71\u7247\u8f49 ", TextPrimary, 20, FontWeight.Bold));
+        titlePanel.Children.Add(ColoredWord("MP4", Blue, 20, FontWeight.Bold));
+        titlePanel.Children.Add(ColoredWord(" / ", TextPrimary, 20, FontWeight.Bold));
+        titlePanel.Children.Add(ColoredWord("MP3", Green, 20, FontWeight.Bold));
+        titlePanel.Children.Add(new TextBlock
         {
-            Text = "\u652f\u63f4\u9ad8\u756b\u8cea\u4e0b\u8f09 \u00b7 \u5feb\u901f\u8f49\u63db \u00b7 \u6279\u91cf\u8655\u7406",
-            FontSize = 13,
+            Text = "\u9ad8\u756b\u8cea\u4e0b\u8f09 \u00b7 \u5feb\u901f\u8f49\u63db \u00b7 \u6279\u91cf\u8655\u7406",
+            FontSize = 12,
             Foreground = TextSecondary,
-            Margin = new Thickness(0, 2, 0, 0)
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(12, 3, 0, 0)
         });
-        row.Children.Add(left);
+        row.Children.Add(titlePanel);
 
-        var settingsBtn = CreateSoftButton("\u8a2d\u5b9a", 96);
+        var settingsBtn = CreateSoftButton("\u8a2d\u5b9a", 72);
+        settingsBtn.MinHeight = 32;
         settingsBtn.Click += (_, _) =>
         {
-            Navigate("files");
+            OpenSection("files");
             SetStatus("\u53ef\u5728\u6b64\u7ba1\u7406\u8f38\u51fa\u8cc7\u6599\u593e");
         };
         Grid.SetColumn(settingsBtn, 1);
-        settingsBtn.VerticalAlignment = VerticalAlignment.Top;
+        settingsBtn.VerticalAlignment = VerticalAlignment.Center;
         row.Children.Add(settingsBtn);
         return row;
     }
@@ -1492,132 +1465,110 @@ public sealed class MainWindow : Window
 
     private Control BuildUrlCard()
     {
-        var body = new StackPanel { Spacing = 12 };
+        var body = new StackPanel { Spacing = 8 };
 
-        body.Children.Add(new TextBlock
+        var labelRow = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto") };
+        labelRow.Children.Add(new TextBlock
         {
-            Text = "\u8cbc\u4e0a YouTube \u6216 Bilibili \u5f71\u7247\u7db2\u5740",
+            Text = "\u8cbc\u4e0a YouTube \u6216 Bilibili \u5f71\u7247\u7db2\u5740\uff08\u53ef\u591a\u884c\u6279\u91cf\uff09",
             FontSize = 13,
             FontWeight = FontWeight.SemiBold,
-            Foreground = TextPrimary
+            Foreground = TextPrimary,
+            VerticalAlignment = VerticalAlignment.Center
         });
+        var chips = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
+        chips.Children.Add(PlatformChip("YouTube", RedYouTube, Brush.Parse("#FFECEC")));
+        chips.Children.Add(PlatformChip("bilibili", PinkBili, PinkBiliSoft));
+        Grid.SetColumn(chips, 1);
+        labelRow.Children.Add(chips);
+        body.Children.Add(labelRow);
 
         var urlRow = new Grid
         {
-            ColumnDefinitions = new ColumnDefinitions("*,Auto"),
-            ColumnSpacing = 10
+            ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto"),
+            ColumnSpacing = 8
         };
         urlRow.Children.Add(_urlBox);
         Grid.SetColumn(_pasteButton, 1);
         urlRow.Children.Add(_pasteButton);
+        Grid.SetColumn(_parseButton, 2);
+        urlRow.Children.Add(_parseButton);
         body.Children.Add(urlRow);
-
-        var actionRow = new Grid
-        {
-            ColumnDefinitions = new ColumnDefinitions("Auto,Auto,*,Auto"),
-            ColumnSpacing = 10
-        };
-
-        var ytChip = PlatformChip("YouTube", RedYouTube, Brush.Parse("#FFECEC"));
-        var biliChip = PlatformChip("bilibili", PinkBili, PinkBiliSoft);
-        actionRow.Children.Add(ytChip);
-        Grid.SetColumn(biliChip, 1);
-        actionRow.Children.Add(biliChip);
-        Grid.SetColumn(_parseButton, 3);
-        actionRow.Children.Add(_parseButton);
-        body.Children.Add(actionRow);
 
         return Card(body);
     }
+
+    private static TextBlock FieldLabel(string text) => new()
+    {
+        Text = text,
+        FontSize = 13,
+        FontWeight = FontWeight.SemiBold,
+        Foreground = TextPrimary,
+        MinWidth = 72,
+        VerticalAlignment = VerticalAlignment.Center
+    };
 
     private Control BuildOptionsAndPreviewRow()
     {
         var row = new Grid
         {
-            ColumnDefinitions = new ColumnDefinitions("*,1.05*"),
-            ColumnSpacing = 14
+            ColumnDefinitions = new ColumnDefinitions("*,*"),
+            ColumnSpacing = 10
         };
 
         var left = new StackPanel { Spacing = 8 };
 
-        left.Children.Add(new TextBlock
-        {
-            Text = "\u9078\u64c7\u8f49\u63db\u683c\u5f0f",
-            FontSize = 13,
-            FontWeight = FontWeight.SemiBold,
-            Foreground = TextPrimary
-        });
-
         var formatRow = new Grid
         {
             ColumnDefinitions = new ColumnDefinitions("*,*"),
-            ColumnSpacing = 10
+            ColumnSpacing = 8
         };
         formatRow.Children.Add(_mp4Card);
         Grid.SetColumn(_mp3Card, 1);
         formatRow.Children.Add(_mp3Card);
         left.Children.Add(formatRow);
 
-        var qualityPanel = new StackPanel
+        var qualityRow = new StackPanel
         {
             Orientation = Orientation.Horizontal,
-            Spacing = 10,
-            VerticalAlignment = VerticalAlignment.Center
+            Spacing = 8
         };
-        qualityPanel.Children.Add(new TextBlock
+        qualityRow.Children.Add(FieldLabel("\u756b\u8cea"));
+        qualityRow.Children.Add(_qualityCombo);
+        qualityRow.Children.Add(new TextBlock
         {
-            Text = "\u756b\u8cea\u9078\u64c7 (MP4)",
-            FontSize = 13,
-            Foreground = TextSecondary,
-            VerticalAlignment = VerticalAlignment.Center
-        });
-        qualityPanel.Children.Add(new TextBlock
-        {
-            Text = "1080P (\u63a8\u85a6)",
+            Text = "\u50c5 MP4 \u00b7 \u5efa\u8b70 1080P",
             FontSize = 12,
             Foreground = TextMuted,
             VerticalAlignment = VerticalAlignment.Center
         });
-        qualityPanel.Children.Add(_qualityCombo);
-        left.Children.Add(qualityPanel);
+        left.Children.Add(qualityRow);
         left.Children.Add(_subtitleCheckBox);
         left.Children.Add(_playlistCheckBox);
 
-        // Cookies file import row
-        left.Children.Add(new TextBlock
+        var cookiesRow = new Grid
         {
-            Text = "Cookies \u6a94\u6848\uff08\u6703\u54e1\u9650\u5b9a\u5f71\u7247\uff09",
-            FontSize = 13,
-            FontWeight = FontWeight.SemiBold,
-            Foreground = TextPrimary,
-            Margin = new Thickness(0, 4, 0, 0)
-        });
-        var cookiesRow = new StackPanel
-        {
-            Orientation = Orientation.Horizontal,
-            Spacing = 8,
-            VerticalAlignment = VerticalAlignment.Center
+            ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto,Auto"),
+            ColumnSpacing = 8
         };
+        cookiesRow.Children.Add(FieldLabel("Cookies"));
+        Grid.SetColumn(_cookiesPathLabel, 1);
         cookiesRow.Children.Add(_cookiesPathLabel);
+        Grid.SetColumn(_cookiesBrowseButton, 2);
         cookiesRow.Children.Add(_cookiesBrowseButton);
+        Grid.SetColumn(_cookiesClearButton, 3);
         cookiesRow.Children.Add(_cookiesClearButton);
         left.Children.Add(cookiesRow);
 
-        left.Children.Add(new TextBlock
-        {
-            Text = "\u5132\u5b58\u4f4d\u7f6e",
-            FontSize = 13,
-            FontWeight = FontWeight.SemiBold,
-            Foreground = TextPrimary,
-            Margin = new Thickness(0, 4, 0, 0)
-        });
         var pathRow = new Grid
         {
-            ColumnDefinitions = new ColumnDefinitions("*,Auto"),
-            ColumnSpacing = 10
+            ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto"),
+            ColumnSpacing = 8
         };
+        pathRow.Children.Add(FieldLabel("\u5132\u5b58\u4f4d\u7f6e"));
+        Grid.SetColumn(_outputBox, 1);
         pathRow.Children.Add(_outputBox);
-        Grid.SetColumn(_browseButton, 1);
+        Grid.SetColumn(_browseButton, 2);
         pathRow.Children.Add(_browseButton);
         left.Children.Add(pathRow);
 
@@ -1634,7 +1585,7 @@ public sealed class MainWindow : Window
 
     private Border BuildPreviewCard()
     {
-        var body = new StackPanel { Spacing = 10 };
+        var body = new StackPanel { Spacing = 8 };
 
         var overlayContent = new Grid();
         overlayContent.Children.Add(_previewImage);
@@ -1680,30 +1631,39 @@ public sealed class MainWindow : Window
 
         var actionRow = new Grid
         {
-            ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto"),
+            ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto,Auto"),
             ColumnSpacing = 8
         };
         actionRow.Children.Add(_previewPlayButton);
-        Grid.SetColumn(_previewStopButton, 1);
+        Grid.SetColumn(_previewStopButton, 2);
         actionRow.Children.Add(_previewStopButton);
-        Grid.SetColumn(_previewBrowserButton, 2);
+        Grid.SetColumn(_previewBrowserButton, 3);
         actionRow.Children.Add(_previewBrowserButton);
         body.Children.Add(actionRow);
 
         body.Children.Add(_previewTitle);
 
-        var meta = new StackPanel { Spacing = 4 };
+        var meta = new Grid
+        {
+            ColumnDefinitions = new ColumnDefinitions("*,*"),
+            RowDefinitions = new RowDefinitions("Auto,Auto"),
+            ColumnSpacing = 8,
+            RowSpacing = 4
+        };
         meta.Children.Add(_previewDuration);
+        Grid.SetColumn(_previewViews, 1);
         meta.Children.Add(_previewViews);
+        Grid.SetRow(_previewChannelFollowers, 1);
         meta.Children.Add(_previewChannelFollowers);
+        Grid.SetRow(_previewDate, 1);
+        Grid.SetColumn(_previewDate, 1);
         meta.Children.Add(_previewDate);
         body.Children.Add(meta);
 
         var statusRow = new StackPanel
         {
             Orientation = Orientation.Horizontal,
-            Spacing = 6,
-            Margin = new Thickness(0, 4, 0, 0)
+            Spacing = 6
         };
         statusRow.Children.Add(new Ellipse
         {
@@ -1722,11 +1682,11 @@ public sealed class MainWindow : Window
     {
         var row = new Grid
         {
-            ColumnDefinitions = new ColumnDefinitions("*,220"),
-            ColumnSpacing = 14
+            ColumnDefinitions = new ColumnDefinitions("*,200"),
+            ColumnSpacing = 10
         };
 
-        var queueBody = new StackPanel { Spacing = 10 };
+        var queueBody = new StackPanel { Spacing = 8 };
         var queueHeader = new Grid
         {
             ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto")
@@ -1756,11 +1716,11 @@ public sealed class MainWindow : Window
         var queueCard = Card(queueBody);
         row.Children.Add(queueCard);
 
-        var utils = new StackPanel { Spacing = 10 };
+        var utils = new StackPanel { Spacing = 8 };
         utils.Children.Add(new TextBlock
         {
             Text = "\u5be6\u7528\u529f\u80fd",
-            FontSize = 14,
+            FontSize = 13,
             FontWeight = FontWeight.SemiBold,
             Foreground = TextPrimary
         });
@@ -1769,16 +1729,16 @@ public sealed class MainWindow : Window
         {
             ColumnDefinitions = new ColumnDefinitions("*,*"),
             RowDefinitions = new RowDefinitions("*,*"),
-            RowSpacing = 10,
-            ColumnSpacing = 10
+            RowSpacing = 8,
+            ColumnSpacing = 8
         };
-        grid.Children.Add(UtilButton("\u641c\u5c0b", "\u641c\u5c0b\u5f71\u7247", () =>
+        grid.Children.Add(UtilButton(IconSearch, "\u641c\u5c0b\u5f71\u7247", () =>
         {
-            Navigate("search");
+            OpenSection("search");
             SetStatus("\u53ef\u641c\u5c0b YouTube / Bilibili \u5f71\u7247");
             _searchBox.Focus();
         }));
-        var sub = UtilButton("CC", "\u5b57\u5e55\u642d\u914d", () =>
+        var sub = UtilButton(IconSubtitle, "\u5b57\u5e55\u642d\u914d", () =>
         {
             _includeSubtitles = !_includeSubtitles;
             _subtitleCheckBox.IsChecked = _includeSubtitles;
@@ -1789,14 +1749,14 @@ public sealed class MainWindow : Window
         });
         Grid.SetColumn(sub, 1);
         grid.Children.Add(sub);
-        var audio = UtilButton("MP3", "\u97f3\u6a02\u63d0\u53d6", () =>
+        var audio = UtilButton(IconMusic, "\u97f3\u6a02\u63d0\u53d6", () =>
         {
             SetOutputFormat("MP3");
             SetStatus("\u5df2\u5207\u63db MP3 \u97f3\u6a02\u63d0\u53d6");
         });
         Grid.SetRow(audio, 1);
         grid.Children.Add(audio);
-        var batch = UtilButton("\u6279\u91cf", "\u6279\u91cf\u4e0b\u8f09", () =>
+        var batch = UtilButton(IconBatch, "\u6279\u91cf\u4e0b\u8f09", () =>
         {
             SetStatus("\u53ef\u5728\u7db2\u5740\u6b04\u8cbc\u591a\u884c\u7db2\u5740\uff08\u6bcf\u884c\u4e00\u500b\uff09\u5f8c\u958b\u59cb\u8f49\u63db");
             _urlBox.Focus();
@@ -1921,37 +1881,42 @@ public sealed class MainWindow : Window
             BorderBrush = selected ? accent : BorderSoft,
             BorderThickness = new Thickness(selected ? 2 : 1),
             CornerRadius = new CornerRadius(12),
-            Padding = new Thickness(14, 12),
+            Padding = new Thickness(10, 8),
             Cursor = new Cursor(StandardCursorType.Hand),
-            MinHeight = 56
+            MinHeight = 48
         };
 
         var row = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto") };
+        var glyph = VectorIcon(label == "MP4" ? IconVideo : IconMusic, accent, 18);
+        glyph.HorizontalAlignment = HorizontalAlignment.Center;
+        glyph.VerticalAlignment = VerticalAlignment.Center;
         row.Children.Add(new Border
         {
-            Width = 36,
-            Height = 36,
-            CornerRadius = new CornerRadius(10),
+            Width = 32,
+            Height = 32,
+            CornerRadius = new CornerRadius(9),
             Background = softBg,
+            BorderBrush = BorderSoft,
+            BorderThickness = new Thickness(1),
             Margin = new Thickness(0, 0, 10, 0),
-            Child = new TextBlock
-            {
-                Text = label == "MP4" ? "VID" : "AUD",
-                FontSize = 10,
-                FontWeight = FontWeight.Bold,
-                Foreground = accent,
-                HorizontalAlignment = HorizontalAlignment.Center,
-                VerticalAlignment = VerticalAlignment.Center
-            }
+            Child = glyph
         });
-        row.Children.Add(new TextBlock
+        var labelStack = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+        labelStack.Children.Add(new TextBlock
         {
             Text = label,
-            FontSize = 20,
+            FontSize = 17,
             FontWeight = FontWeight.Bold,
-            Foreground = accent,
-            VerticalAlignment = VerticalAlignment.Center
+            Foreground = accent
         });
+        labelStack.Children.Add(new TextBlock
+        {
+            Text = label == "MP4" ? "\u5f71\u7247" : "\u97f3\u8a0a",
+            FontSize = 11,
+            Foreground = TextMuted
+        });
+        Grid.SetColumn(labelStack, 1);
+        row.Children.Add(labelStack);
         Grid.SetColumn(radio, 2);
         row.Children.Add(radio);
         card.Child = row;
@@ -1968,25 +1933,25 @@ public sealed class MainWindow : Window
         VerticalAlignment = VerticalAlignment.Center
     };
 
-    private Border UtilButton(string icon, string label, Action onClick)
+    private Border UtilButton((string Stroke, string? Fill) icon, string label, Action onClick)
     {
         var border = new Border
         {
             Background = BlueSoft,
-            CornerRadius = new CornerRadius(12),
-            Padding = new Thickness(10, 14),
+            CornerRadius = new CornerRadius(10),
+            Padding = new Thickness(6, 8),
             Cursor = new Cursor(StandardCursorType.Hand),
-            MinHeight = 72
+            MinHeight = 56
         };
-        var stack = new StackPanel { Spacing = 6, HorizontalAlignment = HorizontalAlignment.Center };
-        stack.Children.Add(new TextBlock
+        var stack = new StackPanel
         {
-            Text = icon,
-            FontSize = 14,
-            FontWeight = FontWeight.Bold,
-            Foreground = Blue,
-            HorizontalAlignment = HorizontalAlignment.Center
-        });
+            Spacing = 4,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        var glyph = VectorIcon(icon, Blue, 20);
+        glyph.HorizontalAlignment = HorizontalAlignment.Center;
+        stack.Children.Add(glyph);
         stack.Children.Add(new TextBlock
         {
             Text = label,
@@ -2001,15 +1966,51 @@ public sealed class MainWindow : Window
         return border;
     }
 
+    // 24x24 line icons: Stroke is drawn as 2px rounded lines, Fill as solid shapes.
+    private static readonly (string Stroke, string? Fill) IconSearch =
+        ("M10.5,4 A6.5,6.5 0 1 1 10.5,17 A6.5,6.5 0 1 1 10.5,4 Z M15.5,15.5 L20,20", null);
+    private static readonly (string Stroke, string? Fill) IconSubtitle =
+        ("M5,5 H19 A2,2 0 0 1 21,7 V17 A2,2 0 0 1 19,19 H5 A2,2 0 0 1 3,17 V7 A2,2 0 0 1 5,5 Z M7,12 H10 M13,12 H17 M7,15.5 H15", null);
+    private static readonly (string Stroke, string? Fill) IconMusic =
+        ("M9,17.5 V5.5 L20,3.5 V15.5", "M6,15 A2.8,2.8 0 1 1 6,20.6 A2.8,2.8 0 1 1 6,15 Z M17,13 A2.8,2.8 0 1 1 17,18.6 A2.8,2.8 0 1 1 17,13 Z");
+    private static readonly (string Stroke, string? Fill) IconBatch =
+        ("M4,6 H14 M4,11 H14 M4,16 H10 M18,9 V19 M14.5,15.5 L18,19 L21.5,15.5", null);
+    private static readonly (string Stroke, string? Fill) IconVideo =
+        ("M4,6 H14 A2,2 0 0 1 16,8 V16 A2,2 0 0 1 14,18 H4 A2,2 0 0 1 2,16 V8 A2,2 0 0 1 4,6 Z M16,10.5 L21.5,7.5 V16.5 L16,13.5", "M7.5,9.5 L11.5,12 L7.5,14.5 Z");
+
+    private static Control VectorIcon((string Stroke, string? Fill) icon, IBrush brush, double size)
+    {
+        var canvas = new Canvas { Width = 24, Height = 24 };
+        canvas.Children.Add(new Avalonia.Controls.Shapes.Path
+        {
+            Data = Geometry.Parse(icon.Stroke),
+            Stroke = brush,
+            StrokeThickness = 2,
+            StrokeLineCap = PenLineCap.Round,
+            StrokeJoin = PenLineJoin.Round
+        });
+        if (icon.Fill is not null)
+        {
+            canvas.Children.Add(new Avalonia.Controls.Shapes.Path
+            {
+                Data = Geometry.Parse(icon.Fill),
+                Fill = brush
+            });
+        }
+
+        return new Viewbox { Width = size, Height = size, Child = canvas };
+    }
+
     private static Border PlatformChip(string text, IBrush fg, IBrush bg) => new()
     {
         Background = bg,
         CornerRadius = new CornerRadius(20),
-        Padding = new Thickness(12, 6),
+        Padding = new Thickness(10, 3),
+        VerticalAlignment = VerticalAlignment.Center,
         Child = new TextBlock
         {
             Text = text,
-            FontSize = 12,
+            FontSize = 11,
             FontWeight = FontWeight.SemiBold,
             Foreground = fg
         }
@@ -2021,52 +2022,9 @@ public sealed class MainWindow : Window
         BorderBrush = BorderSoft,
         BorderThickness = new Thickness(1),
         CornerRadius = new CornerRadius(14),
-        Padding = new Thickness(16),
+        Padding = new Thickness(14, 12),
         Child = child
     };
-
-    private static Control SectionTitle(string title, string subtitle)
-    {
-        var stack = new StackPanel { Spacing = 4, Margin = new Thickness(0, 0, 0, 8) };
-        stack.Children.Add(new TextBlock
-        {
-            Text = title,
-            FontSize = 24,
-            FontWeight = FontWeight.Bold,
-            Foreground = TextPrimary
-        });
-        stack.Children.Add(new TextBlock
-        {
-            Text = subtitle,
-            FontSize = 13,
-            Foreground = TextSecondary
-        });
-        return stack;
-    }
-
-    private static Control EmptyState(string title, string message) => Card(new StackPanel
-    {
-        Spacing = 8,
-        Children =
-        {
-            new TextBlock
-            {
-                Text = title,
-                FontSize = 16,
-                FontWeight = FontWeight.SemiBold,
-                Foreground = TextPrimary,
-                HorizontalAlignment = HorizontalAlignment.Center
-            },
-            new TextBlock
-            {
-                Text = message,
-                FontSize = 13,
-                Foreground = TextMuted,
-                HorizontalAlignment = HorizontalAlignment.Center,
-                TextWrapping = TextWrapping.Wrap
-            }
-        }
-    });
 
     private static TextBox CreateInputBox(string placeholder) => new()
     {
@@ -2080,21 +2038,23 @@ public sealed class MainWindow : Window
     {
         Content = text,
         MinWidth = minWidth,
-        MinHeight = 40,
+        MinHeight = 36,
         FontSize = 13,
         FontWeight = FontWeight.SemiBold,
         Foreground = Brushes.White,
         Background = Blue,
         CornerRadius = new CornerRadius(10),
         Cursor = new Cursor(StandardCursorType.Hand),
-        Padding = new Thickness(14, 8)
+        HorizontalContentAlignment = HorizontalAlignment.Center,
+        VerticalContentAlignment = VerticalAlignment.Center,
+        Padding = new Thickness(12, 6)
     };
 
     private static Button CreateSoftButton(string text, double minWidth) => new()
     {
         Content = text,
         MinWidth = minWidth,
-        MinHeight = 40,
+        MinHeight = 36,
         FontSize = 13,
         Foreground = TextPrimary,
         Background = BlueSoft,
@@ -2102,7 +2062,9 @@ public sealed class MainWindow : Window
         BorderThickness = new Thickness(1),
         CornerRadius = new CornerRadius(10),
         Cursor = new Cursor(StandardCursorType.Hand),
-        Padding = new Thickness(12, 8)
+        HorizontalContentAlignment = HorizontalAlignment.Center,
+        VerticalContentAlignment = VerticalAlignment.Center,
+        Padding = new Thickness(10, 6)
     };
 
     private static Button CreateIconTextButton(string label) => new()
@@ -2758,9 +2720,8 @@ public sealed class MainWindow : Window
         {
             ApplySearchSelection(item);
 
-            // Always rebuild home explicitly — do not rely only on sidebar state.
-            UpdateNavHighlight("home");
-            ShowHomePage();
+            // Search lives on the same page; jump back up to the URL / preview area.
+            ScrollToTop();
             ApplySeededPreviewUi(item);
             SetStatus($"\u5df2\u9078\u7528\uff1a{item.Title}");
             AppendLog($"\u641c\u5c0b\u9078\u7528 [{item.Platform}]: {item.Url}");
@@ -2794,35 +2755,11 @@ public sealed class MainWindow : Window
             {
                 // Last-resort: still put the URL in the box even if navigation failed.
                 _urlBox.Text = item.Url;
-                UpdateNavHighlight("home");
-                ShowHomePage();
+                ScrollToTop();
             }
             catch
             {
                 // ignore secondary failures
-            }
-        }
-    }
-
-    private void UpdateNavHighlight(string id)
-    {
-        _activeNav = id;
-        foreach (var item in _navItems)
-        {
-            var active = item.Id == id;
-            item.Border.Background = active ? Blue : Brushes.Transparent;
-            if (item.Border.Child is StackPanel sp)
-            {
-                if (sp.Children.Count >= 1 && sp.Children[0] is Ellipse dot)
-                {
-                    dot.Fill = active ? Brushes.White : Blue;
-                }
-
-                if (sp.Children.Count >= 2 && sp.Children[1] is TextBlock label)
-                {
-                    label.Foreground = active ? Brushes.White : TextPrimary;
-                    label.FontWeight = active ? FontWeight.SemiBold : FontWeight.Normal;
-                }
             }
         }
     }
@@ -3446,7 +3383,7 @@ public sealed class MainWindow : Window
         var ytDlpPath = ToolLocator.FindExecutable("yt-dlp");
         if (ytDlpPath is null)
         {
-            ShowParseError("\u7f3a\u5c11 yt-dlp\uff0c\u56e0\u6b64\u7121\u6cd5\u8b80\u53d6\u5f71\u7247\u8cc7\u8a0a\u3002\u8acb\u5148\u5b89\u88dd yt-dlp\uff0c\u91cd\u555f\u7a0b\u5f0f\u5f8c\u518d\u8a66\u3002");
+            ShowParseError("\u7f3a\u5c11 yt-dlp\uff0c\u56e0\u6b64\u7121\u6cd5\u8b80\u53d6\u5f71\u7247\u8cc7\u8a0a\u3002\u8acb\u4f9d\u756b\u9762\u4e0a\u65b9\u300c\u5b89\u88dd\u914d\u5957\u5de5\u5177\u300d\u7684\u6b65\u9a5f\u5b89\u88dd\uff0c\u88dd\u597d\u5f8c\u4e0d\u9700\u91cd\u555f\u7a0b\u5f0f\u3002");
             SetStatus("\u89e3\u6790\u5931\u6557\uff1a\u627e\u4e0d\u5230 yt-dlp");
             AppendInstallHint();
             return;
@@ -4875,6 +4812,7 @@ public sealed class MainWindow : Window
                 }
             };
             item.OnOpen = () => OpenMediaFile(item.OutputPath, item.Format);
+            item.OnStateChanged = RefreshQueueSections;
             _downloadItems.Add(item);
         }
 
@@ -6332,9 +6270,9 @@ public sealed class MainWindow : Window
         var ffmpeg = ToolLocator.FindExecutable("ffmpeg");
         var ffprobe = ToolLocator.FindExecutable("ffprobe");
 
-        if (ytDlp is null || ffmpeg is null || ffprobe is null)
+        if (!RefreshToolSetup())
         {
-            SetStatus("\u9700\u8981 yt-dlp \u548c ffmpeg \u624d\u80fd\u8f49\u63db MP3 / MP4");
+            SetStatus("\u7b2c\u4e00\u6b21\u4f7f\u7528\uff1a\u8acb\u5148\u4f9d\u4e0a\u65b9\u6307\u5f15\u5b89\u88dd\u914d\u5957\u5de5\u5177 yt-dlp \u8207 ffmpeg");
             AppendInstallHint();
             AppendLog($"yt-dlp: {ytDlp ?? "\u627e\u4e0d\u5230"}");
             AppendLog($"ffmpeg: {ffmpeg ?? "\u627e\u4e0d\u5230"}");
@@ -6350,20 +6288,213 @@ public sealed class MainWindow : Window
 
     private void AppendInstallHint()
     {
-        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        var os = ToolSetupGuide.CurrentOs;
+        AppendLog($"\u5b89\u88dd\u6307\u4ee4: {ToolSetupGuide.GetInstallCommand(os, os == "osx" && ToolSetupGuide.HasHomebrew())}");
+        if (!RefreshToolSetup())
         {
-            AppendLog("Windows: winget install yt-dlp.yt-dlp Gyan.FFmpeg");
-            AppendLog("\u8acb\u4ee5\u7ba1\u7406\u54e1\u8eab\u5206\u57f7\u884c\u7d42\u7aef\u6a5f\u5f8c\u5b89\u88dd\uff0c\u518d\u91cd\u555f\u7a0b\u5f0f\u3002");
-            return;
+            _toolSetupPanel.BringIntoView();
+        }
+    }
+
+    /// <summary>
+    /// Re-detects yt-dlp / ffmpeg and shows or hides the install guide.
+    /// Returns true when every required tool is available.
+    /// </summary>
+    private bool RefreshToolSetup()
+    {
+        var ytDlp = ToolLocator.FindExecutable("yt-dlp");
+        var ffmpeg = ToolLocator.FindExecutable("ffmpeg");
+        var ffprobe = ToolLocator.FindExecutable("ffprobe");
+        var ready = ytDlp is not null && ffmpeg is not null && ffprobe is not null;
+        var wasMissing = _toolsMissing;
+        _toolsMissing = !ready;
+
+        if (ready)
+        {
+            _toolSetupPanel.IsVisible = false;
+            if (wasMissing)
+            {
+                HideParseError();
+                SetStatus("\u914d\u5957\u5de5\u5177\u5b89\u88dd\u5b8c\u6210\uff0c\u53ef\u4ee5\u958b\u59cb\u8f49\u63db\u4e86");
+                AppendLog($"yt-dlp: {ytDlp}");
+                AppendLog($"ffmpeg: {ffmpeg}");
+                AppendLog($"ffprobe: {ffprobe}");
+            }
+
+            return true;
         }
 
-        if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+        BuildToolSetupContent(ytDlp is not null, ffmpeg is not null && ffprobe is not null);
+        _toolSetupPanel.IsVisible = true;
+        return false;
+    }
+
+    private void BuildToolSetupContent(bool hasYtDlp, bool hasFfmpeg)
+    {
+        var os = ToolSetupGuide.CurrentOs;
+        var hasHomebrew = os == "osx" && ToolSetupGuide.HasHomebrew();
+        var command = ToolSetupGuide.GetInstallCommand(os, hasHomebrew);
+
+        _toolSetupBody.Children.Clear();
+        _toolSetupBody.Children.Add(new TextBlock
         {
-            AppendLog("macOS: brew install yt-dlp ffmpeg");
-            return;
+            Text = "\u958b\u59cb\u4f7f\u7528\u524d\uff1a\u5b89\u88dd\u914d\u5957\u5de5\u5177",
+            FontSize = 16,
+            FontWeight = FontWeight.SemiBold,
+            Foreground = Brush.Parse("#92400E")
+        });
+        _toolSetupBody.Children.Add(new TextBlock
+        {
+            Text = "\u8f49\u63db\u9700\u8981\u5169\u500b\u514d\u8cbb\u5de5\u5177\uff1ayt-dlp\uff08\u8b80\u53d6\u5f71\u7247\uff09\u8207 ffmpeg\uff08\u8f49\u6210 MP3 / MP4\uff09\u3002\u53ea\u9700\u5b89\u88dd\u4e00\u6b21\uff0c\u4e4b\u5f8c\u5c31\u80fd\u76f4\u63a5\u4f7f\u7528\u3002",
+            FontSize = 13,
+            Foreground = TextSecondary,
+            TextWrapping = TextWrapping.Wrap
+        });
+
+        var chips = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+        chips.Children.Add(ToolStatusChip("yt-dlp", hasYtDlp));
+        chips.Children.Add(ToolStatusChip("ffmpeg", hasFfmpeg));
+        _toolSetupBody.Children.Add(chips);
+
+        var steps = ToolSetupGuide.GetSteps(os, hasHomebrew);
+        var stepsPanel = new StackPanel { Spacing = 4 };
+        for (var i = 0; i < steps.Length; i++)
+        {
+            stepsPanel.Children.Add(new TextBlock
+            {
+                Text = $"{i + 1}. {steps[i]}",
+                FontSize = 13,
+                Foreground = TextPrimary,
+                TextWrapping = TextWrapping.Wrap
+            });
+        }
+        _toolSetupBody.Children.Add(stepsPanel);
+
+        _toolSetupBody.Children.Add(new TextBlock
+        {
+            Text = ToolSetupGuide.SupportsOneClickInstall(os)
+                ? "\u60f3\u81ea\u5df1\u64cd\u4f5c\uff1a\u8907\u88fd\u4e0b\u65b9\u6307\u4ee4\uff0c\u8cbc\u5230\u300c\u7d42\u7aef\u6a5f\u300d\u5f8c\u6309 Enter\u3002"
+                : "\u5b89\u88dd\u6307\u4ee4\uff1a",
+            FontSize = 12,
+            Foreground = TextMuted
+        });
+        _toolSetupBody.Children.Add(new TextBox
+        {
+            Text = command,
+            IsReadOnly = true,
+            TextWrapping = TextWrapping.Wrap,
+            FontFamily = new FontFamily(PlatformCopy.MonoFontFamily),
+            FontSize = 12,
+            Background = Brushes.White,
+            BorderBrush = Brush.Parse("#FDE68A")
+        });
+
+        var buttons = new WrapPanel { Orientation = Orientation.Horizontal };
+        if (ToolSetupGuide.SupportsOneClickInstall(os))
+        {
+            var installButton = CreatePrimaryButton("\u4e00\u9375\u5b89\u88dd", 120);
+            installButton.Margin = new Thickness(0, 0, 10, 0);
+            installButton.Click += (_, _) => LaunchToolInstaller();
+            buttons.Children.Add(installButton);
         }
 
-        AppendLog("Please install yt-dlp and ffmpeg via your package manager.");
+        var copyButton = CreateSoftButton("\u8907\u88fd\u6307\u4ee4", 100);
+        copyButton.Margin = new Thickness(0, 0, 10, 0);
+        copyButton.Click += async (_, _) =>
+        {
+            try
+            {
+                var clipboard = TopLevel.GetTopLevel(this)?.Clipboard;
+                if (clipboard is null)
+                {
+                    SetStatus("\u8907\u88fd\u5931\u6557\uff0c\u8acb\u624b\u52d5\u9078\u53d6\u6307\u4ee4");
+                    return;
+                }
+
+                await clipboard.SetTextAsync(command);
+                SetStatus("\u5df2\u8907\u88fd\u5b89\u88dd\u6307\u4ee4\uff0c\u8acb\u8cbc\u5230\u7d42\u7aef\u6a5f\u57f7\u884c");
+            }
+            catch (Exception ex)
+            {
+                SetStatus("\u8907\u88fd\u5931\u6557\uff0c\u8acb\u624b\u52d5\u9078\u53d6\u6307\u4ee4");
+                AppendLog(ex.Message);
+            }
+        };
+        buttons.Children.Add(copyButton);
+
+        var recheckButton = CreateSoftButton("\u91cd\u65b0\u6aa2\u67e5", 100);
+        recheckButton.Click += (_, _) =>
+        {
+            if (!RefreshToolSetup())
+            {
+                SetStatus("\u5c1a\u672a\u5075\u6e2c\u5230\u5168\u90e8\u5de5\u5177\uff1b\u8acb\u78ba\u8a8d\u5b89\u88dd\u8996\u7a97\u5df2\u986f\u793a\u5b8c\u6210\u5f8c\u518d\u6309\u4e00\u6b21");
+            }
+        };
+        buttons.Children.Add(recheckButton);
+        _toolSetupBody.Children.Add(buttons);
+    }
+
+    private static Border ToolStatusChip(string name, bool installed) => new()
+    {
+        Background = installed ? GreenSoft : Brush.Parse("#FEE4E2"),
+        CornerRadius = new CornerRadius(12),
+        Padding = new Thickness(10, 4),
+        Child = new TextBlock
+        {
+            Text = installed ? $"\u2713 {name} \u5df2\u5b89\u88dd" : $"\u2717 {name} \u672a\u5b89\u88dd",
+            FontSize = 12,
+            FontWeight = FontWeight.SemiBold,
+            Foreground = installed ? Brush.Parse("#15803D") : Brush.Parse("#B42318")
+        }
+    };
+
+    private void LaunchToolInstaller()
+    {
+        try
+        {
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+            {
+                var script = IoPath.Combine(IoPath.GetTempPath(), "install-converter-tools.command");
+                File.WriteAllText(script, ToolSetupGuide.BuildMacInstallScript());
+                File.SetUnixFileMode(script,
+                    UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = "open",
+                    ArgumentList = { "-a", "Terminal", script },
+                    UseShellExecute = false
+                });
+            }
+            else if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            {
+                var command = ToolSetupGuide.GetInstallCommand("windows", hasHomebrew: false);
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = "powershell.exe",
+                    Arguments = $"-NoExit -Command \"{command}; Write-Host ''; Write-Host '\u5b8c\u6210\u5f8c\u8acb\u95dc\u9589\u6b64\u8996\u7a97\uff0c\u56de\u5230\u5f71\u97f3\u8f49\u63db\u5927\u5e2b\u6309\u300c\u91cd\u65b0\u6aa2\u67e5\u300d\u3002'\"",
+                    UseShellExecute = true,
+                    Verb = "runas"
+                });
+            }
+            else
+            {
+                return;
+            }
+
+            SetStatus("\u5df2\u958b\u555f\u5b89\u88dd\u8996\u7a97\uff0c\u8acb\u4f9d\u756b\u9762\u6307\u793a\u5b8c\u6210\u5b89\u88dd");
+            AppendLog("\u5df2\u555f\u52d5\u914d\u5957\u5de5\u5177\u5b89\u88dd\u7a0b\u5e8f");
+        }
+        catch (System.ComponentModel.Win32Exception ex) when (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            // Declining the administrator prompt lands here.
+            SetStatus("\u5b89\u88dd\u5df2\u53d6\u6d88\uff1b\u4e5f\u53ef\u4ee5\u6309\u300c\u8907\u88fd\u6307\u4ee4\u300d\u81ea\u884c\u57f7\u884c");
+            AppendLog(ex.Message);
+        }
+        catch (Exception ex)
+        {
+            SetStatus("\u7121\u6cd5\u81ea\u52d5\u958b\u555f\u5b89\u88dd\u8996\u7a97\uff0c\u8acb\u6309\u300c\u8907\u88fd\u6307\u4ee4\u300d\u81ea\u884c\u57f7\u884c");
+            AppendLog(ex.Message);
+        }
     }
 
     private void SetBusy(bool busy)
@@ -6383,6 +6514,7 @@ public sealed class MainWindow : Window
 
     private void RebuildDownloadList()
     {
+        RefreshQueueSections();
         _downloadListPanel.Children.Clear();
         _queueCountText.Text = $"\u4e0b\u8f09\u6e05\u55ae ({_downloadItems.Count})";
 
@@ -6658,7 +6790,12 @@ public sealed class MainWindow : Window
             : null;
     }
 
-    private sealed record NavItem(string Id, Border Border);
+    private sealed record CollapsibleSection(
+        Expander Expander,
+        TextBlock TitleText,
+        string Title,
+        Func<Control> BuildContent,
+        bool RebuildOnExpand);
     private sealed record PreviewStreamInfo(string Url, string Referer);
     private sealed record CookieSelection(string Label, bool IsAutomaticBrowser);
     private sealed record YtDlpAttemptResult(int ExitCode, bool UsedAutomaticBrowserCookies);
@@ -6748,6 +6885,7 @@ public sealed class MainWindow : Window
         public Action? OnRemove { get; set; }
         public Action? OnCancel { get; set; }
         public Action? OnOpen { get; set; }
+        public Action? OnStateChanged { get; set; }
 
         public DownloadItemView(string title, string url, string format, string quality)
         {
@@ -6920,6 +7058,7 @@ public sealed class MainWindow : Window
                     // ignore UI update races after window close
                 }
             }, DispatcherPriority.Background);
+            OnStateChanged?.Invoke();
         }
 
         public void ResetForRetry()

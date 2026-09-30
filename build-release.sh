@@ -4,6 +4,18 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT"
 
+# Use the user-local .NET SDK when dotnet is not on PATH (e.g. ~/.dotnet).
+if ! command -v dotnet >/dev/null 2>&1; then
+  for dir in "$HOME/.dotnet" /usr/local/share/dotnet; do
+    if [ -x "$dir/dotnet" ]; then
+      export DOTNET_ROOT="$dir"
+      export PATH="$dir:$PATH"
+      break
+    fi
+  done
+fi
+command -v dotnet >/dev/null 2>&1 || { echo "找不到 dotnet，請先安裝 .NET 8 SDK"; exit 1; }
+
 VERSION="$(python3 - <<'PY'
 import re, pathlib
 text = pathlib.Path("YoutubeOrBilibiliMP3Converter.csproj").read_text()
@@ -24,7 +36,8 @@ write_usage() {
   cat > "$dest" <<EOF
 影音轉換大師 ${VERSION}  (${platform})
 
-第一次使用前請安裝 yt-dlp 與 ffmpeg：
+第一次使用前需要 yt-dlp 與 ffmpeg。程式首頁會顯示「安裝配套工具」指引，
+可按「一鍵安裝」（macOS / Windows），或自行執行：
 
   Windows:  winget install yt-dlp.yt-dlp Gyan.FFmpeg
   macOS:    brew install yt-dlp ffmpeg
