@@ -68,6 +68,9 @@ public sealed partial class MainWindow
     private ShellPhase _shellPhase = ShellPhase.Input;
     private ShellTheme _shellTheme = ShellTheme.Dark;
     private Border? _shellCenter;
+    private ScrollViewer? _shellScroll;
+    private Border? _shellPreviewFrame;
+    private bool _fittingWindow;
     private TextBox? _shellUrlBox;
     private TextBox? _shellSearchBox;
     private TextBlock? _shellHintText;
@@ -111,13 +114,14 @@ public sealed partial class MainWindow
             Padding = new Thickness(0),
             MinHeight = Height > 0 ? Height : 700
         };
-        var scroll = new ScrollViewer
+        _shellScroll = new ScrollViewer
         {
             Content = _shellCenter,
             HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
             Background = Brushes.Transparent
         };
+        var scroll = _shellScroll;
 
         AddHandler(KeyDownEvent, OnShellKeyDown, RoutingStrategies.Tunnel);
         SizeChanged += (_, e) =>
@@ -181,6 +185,7 @@ public sealed partial class MainWindow
             _shellProgressBar = null;
             _shellProgressMeta = null;
             _formatCards.Clear();
+            _shellPreviewFrame = null;
 
             ApplyShellTheme();
             var palette = CurrentPalette();
@@ -230,18 +235,19 @@ public sealed partial class MainWindow
             if (_shellPhase is ShellPhase.Picking or ShellPhase.History or ShellPhase.Settings)
             {
                 page.VerticalAlignment = VerticalAlignment.Top;
-                page.Margin = new Thickness(0, 18, 0, 0);
+                page.Margin = new Thickness(0, 8, 0, 0);
             }
 
             var stage = new Border
             {
                 HorizontalAlignment = HorizontalAlignment.Stretch,
-                MinHeight = Math.Max(360, (_shellCenter?.MinHeight ?? 700) - 96),
-                Padding = new Thickness(32, 12, 32, 36),
+                MinHeight = 0,
+                Padding = new Thickness(32, 8, 32, 20),
                 Child = page
             };
             root.Children.Add(stage);
             _shellCenter!.Child = root;
+            FitWindowToContent(root, stage);
 
             Dispatcher.UIThread.Post(() =>
             {
@@ -467,7 +473,6 @@ public sealed partial class MainWindow
         if (preview is not null)
         {
             page.Children.Add(preview);
-            page.Children.Add(Gap(16));
         }
 
         page.Children.Add(Eyebrow("選擇格式", palette));
@@ -521,8 +526,8 @@ public sealed partial class MainWindow
             });
         }
 
-        page.Children.Add(Gap(18));
-        var rows = new StackPanel { Spacing = 8 };
+        page.Children.Add(Gap(12));
+        var rows = new StackPanel { Spacing = 6 };
         for (var index = 0; index < _formatChoices.Count; index++)
         {
             rows.Children.Add(BuildFormatRow(palette, index));
@@ -548,24 +553,33 @@ public sealed partial class MainWindow
         };
         var badge = new Border
         {
-            Width = 58,
-            Height = 58,
-            CornerRadius = new CornerRadius(16),
+            Width = 52,
+            Height = 36,
+            CornerRadius = new CornerRadius(12),
             Child = badgeText
         };
         var title = new TextBlock
         {
             FontSize = 16,
             FontWeight = FontWeight.SemiBold,
-            Foreground = palette.Primary
+            Foreground = palette.Primary,
+            VerticalAlignment = VerticalAlignment.Center,
+            TextWrapping = TextWrapping.NoWrap
         };
         var detail = new TextBlock
         {
             FontSize = 13,
             Foreground = palette.Gray,
-            Margin = new Thickness(0, 2, 0, 0)
+            VerticalAlignment = VerticalAlignment.Center,
+            TextWrapping = TextWrapping.NoWrap
         };
-        var copy = new StackPanel { VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(14, 0, 12, 0) };
+        var copy = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            VerticalAlignment = VerticalAlignment.Center,
+            Spacing = 12,
+            Margin = new Thickness(14, 0, 12, 0)
+        };
         copy.Children.Add(title);
         copy.Children.Add(detail);
         var grid = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*") };
@@ -575,7 +589,7 @@ public sealed partial class MainWindow
         var row = new Border
         {
             CornerRadius = new CornerRadius(18),
-            Padding = new Thickness(10),
+            Padding = new Thickness(8, 6),
             Cursor = new Cursor(StandardCursorType.Hand),
             Child = grid
         };
@@ -1633,7 +1647,7 @@ public sealed partial class MainWindow
         var image = new Image
         {
             Stretch = Stretch.UniformToFill,
-            Height = 200,
+            Height = 150,
             Source = string.Equals(_shellPreviewUrl, url, StringComparison.Ordinal) ? _shellPreviewBitmap : null
         };
         if (image.Source is null)
@@ -1641,14 +1655,101 @@ public sealed partial class MainWindow
             _ = LoadShellPreviewAsync(url, image);
         }
 
-        return new Border
+        _shellPreviewFrame = new Border
         {
-            Height = 200,
+            Height = 150,
+            Margin = new Thickness(0, 0, 0, 12),
             CornerRadius = new CornerRadius(18),
             ClipToBounds = true,
             Background = palette.Track,
             Child = image
         };
+        return _shellPreviewFrame;
+    }
+
+    private double MaxClientHeight()
+    {
+        var screen = Screens?.ScreenFromWindow(this) ?? Screens?.Primary;
+        if (screen is null)
+        {
+            return 860;
+        }
+
+        // Height is the client area. The macOS title bar sits outside it.
+        return Math.Max(MinHeight, screen.WorkingArea.Height / screen.Scaling - 64);
+    }
+
+    private void FitWindowToContent(Control root, Border stage)
+    {
+        if (_fittingWindow)
+        {
+            return;
+        }
+
+        var limit = MaxClientHeight();
+        var width = Math.Max(Width, MinWidth);
+        double Measure()
+        {
+            root.Measure(new Size(width, double.PositiveInfinity));
+            return Math.Ceiling(root.DesiredSize.Height);
+        }
+
+        var desired = Measure();
+        if (_shellPreviewFrame is not null && desired > limit)
+        {
+            var next = _shellPreviewFrame.Height - (desired - limit) - 4;
+            if (_shellPreviewFrame.Child is Image image)
+            {
+                image.Height = Math.Max(0, next);
+            }
+
+            if (next < 72)
+            {
+                _shellPreviewFrame.IsVisible = false;
+                _shellPreviewFrame.Height = 0;
+                _shellPreviewFrame.Margin = new Thickness(0);
+            }
+            else
+            {
+                _shellPreviewFrame.Height = next;
+            }
+
+            desired = Measure();
+        }
+
+        var target = Math.Clamp(Math.Max(desired + 2, 700), MinHeight, limit);
+        if (target > desired)
+        {
+            stage.MinHeight = stage.DesiredSize.Height + (target - desired);
+        }
+
+        _fittingWindow = true;
+        try
+        {
+            if (Math.Abs(Height - target) > 1)
+            {
+                Height = target;
+            }
+
+            var screen = Screens?.ScreenFromWindow(this) ?? Screens?.Primary;
+            if (screen is not null)
+            {
+                var area = screen.WorkingArea;
+                var scale = screen.Scaling;
+                var bottom = Position.Y + (Height + 58) * scale;
+                var overflow = bottom - (area.Y + area.Height);
+                if (overflow > 0)
+                {
+                    Position = new PixelPoint(
+                        Position.X,
+                        Math.Max(area.Y, Position.Y - (int)Math.Ceiling(overflow)));
+                }
+            }
+        }
+        finally
+        {
+            _fittingWindow = false;
+        }
     }
 
     private async Task LoadShellPreviewAsync(string url, Image image)
