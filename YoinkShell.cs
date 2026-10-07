@@ -70,6 +70,8 @@ public sealed partial class MainWindow
     private Border? _shellCenter;
     private ScrollViewer? _shellScroll;
     private Border? _shellPreviewFrame;
+    private Control? _shellLayoutRoot;
+    private Border? _shellLayoutStage;
     private bool _fittingWindow;
     private TextBox? _shellUrlBox;
     private TextBox? _shellSearchBox;
@@ -248,6 +250,8 @@ public sealed partial class MainWindow
             };
             root.Children.Add(stage);
             _shellCenter!.Child = root;
+            _shellLayoutRoot = root;
+            _shellLayoutStage = stage;
             FitWindowToContent(root, stage);
 
             Dispatcher.UIThread.Post(() =>
@@ -1653,10 +1657,12 @@ public sealed partial class MainWindow
             return null;
         }
 
+        var previewHeight = ThumbnailHeight(_shellPreviewBitmap);
         var image = new Image
         {
-            Stretch = Stretch.UniformToFill,
-            Height = 150,
+            Stretch = Stretch.Uniform,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            VerticalAlignment = VerticalAlignment.Center,
             Source = string.Equals(_shellPreviewUrl, url, StringComparison.Ordinal) ? _shellPreviewBitmap : null
         };
         if (image.Source is null)
@@ -1666,7 +1672,7 @@ public sealed partial class MainWindow
 
         _shellPreviewFrame = new Border
         {
-            Height = 150,
+            Height = previewHeight,
             Margin = new Thickness(0, 0, 0, 12),
             CornerRadius = new CornerRadius(18),
             ClipToBounds = true,
@@ -1674,6 +1680,17 @@ public sealed partial class MainWindow
             Child = image
         };
         return _shellPreviewFrame;
+    }
+
+    private static double ThumbnailHeight(Bitmap? bitmap)
+    {
+        if (bitmap is null || bitmap.PixelSize.Width <= 0 || bitmap.PixelSize.Height <= 0)
+        {
+            return Math.Round(StageWidth * 9 / 16.0);
+        }
+
+        var height = StageWidth * bitmap.PixelSize.Height / bitmap.PixelSize.Width;
+        return Math.Clamp(Math.Round(height), 120, 420);
     }
 
     private double MaxClientHeight()
@@ -1707,11 +1724,6 @@ public sealed partial class MainWindow
         if (_shellPreviewFrame is not null && desired > limit)
         {
             var next = _shellPreviewFrame.Height - (desired - limit) - 4;
-            if (_shellPreviewFrame.Child is Image image)
-            {
-                image.Height = Math.Max(0, next);
-            }
-
             if (next < 72)
             {
                 _shellPreviewFrame.IsVisible = false;
@@ -1789,6 +1801,15 @@ public sealed partial class MainWindow
                 _shellPreviewBitmap = bitmap;
                 _shellPreviewUrl = url;
                 image.Source = bitmap;
+                if (_shellPreviewFrame is not null)
+                {
+                    _shellPreviewFrame.Height = ThumbnailHeight(bitmap);
+                }
+
+                if (_shellLayoutRoot is not null && _shellLayoutStage is not null)
+                {
+                    FitWindowToContent(_shellLayoutRoot, _shellLayoutStage);
+                }
             });
         }
         catch (Exception ex)
