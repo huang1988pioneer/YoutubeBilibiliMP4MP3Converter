@@ -82,6 +82,7 @@ public sealed partial class MainWindow
     private List<FormatChoiceBuilder.Choice> _formatChoices = [];
     private readonly List<string> _shellUrlHistory = [];
     private int _formatIndex;
+    private int _formatHover = -1;
     private int _shellRecallIndex = -1;
     private int _shellSpinFrame;
     private int _probeGeneration;
@@ -534,11 +535,6 @@ public sealed partial class MainWindow
         }
 
         page.Children.Add(rows);
-        page.Children.Add(Gap(16));
-        var downloadLabel = VideoAccess.RequiresAccount(info?.Access ?? VideoAccess.Kind.Public)
-            ? "下載這支影片"
-            : "下載所選格式";
-        page.Children.Add(PrimaryButton(palette, downloadLabel, () => _ = DownloadCurrentChoiceAsync()));
         PaintFormatRows();
     }
 
@@ -604,17 +600,28 @@ public sealed partial class MainWindow
         var captured = index;
         row.PointerEntered += (_, _) =>
         {
-            if (_formatIndex == captured)
+            if (_formatHover == captured)
             {
                 return;
             }
 
-            _formatIndex = captured;
+            _formatHover = captured;
+            PaintFormatRows();
+        };
+        row.PointerExited += (_, _) =>
+        {
+            if (_formatHover != captured)
+            {
+                return;
+            }
+
+            _formatHover = -1;
             PaintFormatRows();
         };
         row.PointerPressed += (_, e) =>
         {
             _formatIndex = captured;
+            _formatHover = -1;
             PaintFormatRows();
             e.Handled = true;
             _ = DownloadCurrentChoiceAsync();
@@ -627,7 +634,8 @@ public sealed partial class MainWindow
         var palette = CurrentPalette();
         for (var index = 0; index < _formatCards.Count && index < _formatChoices.Count; index++)
         {
-            var selected = index == _formatIndex;
+            var active = _formatHover >= 0 ? _formatHover : _formatIndex;
+            var selected = index == active;
             var choice = _formatChoices[index];
             var card = _formatCards[index];
             var (badge, title, detail) = DescribeChoice(choice);
@@ -1241,6 +1249,7 @@ public sealed partial class MainWindow
             }
 
             _formatIndex = 0;
+            _formatHover = -1;
             _shellPhase = ShellPhase.Picking;
         }
 
