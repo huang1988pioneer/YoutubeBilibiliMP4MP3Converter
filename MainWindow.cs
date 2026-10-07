@@ -5178,6 +5178,9 @@ public sealed partial class MainWindow : Window
         startInfo.ArgumentList.Add("8");
         startInfo.ArgumentList.Add("--fragment-retries");
         startInfo.ArgumentList.Add("8");
+        startInfo.ArgumentList.Add("--concurrent-fragments");
+        startInfo.ArgumentList.Add(
+            YoutubeDownloadPolicy.ConcurrentFragments(url).ToString(CultureInfo.InvariantCulture));
         // Optional full playlist download; default remains single-video only.
         startInfo.ArgumentList.Add(_downloadPlaylist ? "--yes-playlist" : "--no-playlist");
 

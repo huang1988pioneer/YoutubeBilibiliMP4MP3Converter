@@ -5,6 +5,40 @@ internal static class YoutubeDownloadPolicy
     public const string StandardExtractorArgs = "youtube:player_client=default,ios,tv,web";
     public const string FallbackExtractorArgs = "youtube:player_client=ios,tv,web";
 
+    public static bool IsBilibiliUrl(string? url)
+    {
+        if (string.IsNullOrWhiteSpace(url) || !Uri.TryCreate(url, UriKind.Absolute, out var uri))
+        {
+            return false;
+        }
+
+        var host = uri.Host;
+        return host.Equals("b23.tv", StringComparison.OrdinalIgnoreCase)
+            || host.EndsWith(".b23.tv", StringComparison.OrdinalIgnoreCase)
+            || host.Equals("bilibili.com", StringComparison.OrdinalIgnoreCase)
+            || host.EndsWith(".bilibili.com", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Bilibili throttles a single connection to a few hundred KiB/s.
+    /// Parallel DASH fragments use the built-in yt-dlp downloader, with no extra tool.
+    /// YouTube stays lower so extra connections do not trip HTTP 403.
+    /// </summary>
+    public static int ConcurrentFragments(string? url)
+    {
+        if (IsBilibiliUrl(url))
+        {
+            return 16;
+        }
+
+        if (IsYouTubeUrl(url))
+        {
+            return 4;
+        }
+
+        return 8;
+    }
+
     public static bool IsYouTubeUrl(string? url)
     {
         if (string.IsNullOrWhiteSpace(url) || !Uri.TryCreate(url, UriKind.Absolute, out var uri))

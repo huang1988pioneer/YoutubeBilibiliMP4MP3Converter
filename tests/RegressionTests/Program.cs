@@ -88,6 +88,14 @@ try
         "yt-dlp 403 lines must trigger a compatibility retry");
     AssertFalse(YoutubeDownloadPolicy.LooksLikeHttpForbidden("download 100%"),
         "Successful progress is not a 403");
+    AssertEqual("16", YoutubeDownloadPolicy.ConcurrentFragments("https://www.bilibili.com/video/BV1kQHs6cEpP").ToString(),
+        "Bilibili downloads use parallel fragments because one connection is throttled");
+    AssertEqual("16", YoutubeDownloadPolicy.ConcurrentFragments("https://b23.tv/abc").ToString(),
+        "Bilibili short links use the same parallel download");
+    AssertEqual("4", YoutubeDownloadPolicy.ConcurrentFragments("https://www.youtube.com/watch?v=abc").ToString(),
+        "YouTube uses fewer parallel fragments to avoid HTTP 403");
+    AssertEqual("8", YoutubeDownloadPolicy.ConcurrentFragments("https://example.com/watch").ToString(),
+        "Other sites use a middle fragment count");
     AssertTrue(YoutubeDownloadPolicy.LooksLikeOutdatedYtDlp(
             "WARNING: Your yt-dlp version (2026.03.17) is older than 90 days!"),
         "Outdated yt-dlp warning must be recognized");
