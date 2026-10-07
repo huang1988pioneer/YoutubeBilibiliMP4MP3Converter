@@ -34,6 +34,7 @@ internal sealed class AppSettings
     public DateOnly TodayDate { get; init; } = DateOnly.FromDateTime(DateTime.Now);
     public string? CookieFilePath { get; init; }
     public List<RecentSearchSetting>? RecentSearches { get; init; }
+    public string? Theme { get; init; }
 
     public static AppSettings Load()
     {
@@ -69,7 +70,8 @@ internal sealed class AppSettings
                             : GetDefaultOutputFolder(),
                         UrlInputCount = settings.UrlInputCount is 1 or 3 or 7 ? settings.UrlInputCount : 1,
                         OutputFormat = string.Equals(settings.OutputFormat, "MP3", StringComparison.OrdinalIgnoreCase) ? "MP3" : "MP4",
-                        Mp4Quality = NormalizeQuality(settings.Mp4Quality),
+                        Mp4Quality = YoutubeDownloadPolicy.NormalizeQuality(settings.Mp4Quality),
+                        Theme = settings.Theme,
                         // Missing property in older settings.json => default off.
                         IncludeSubtitles = settings.IncludeSubtitles ?? false,
                         DownloadPlaylist = settings.DownloadPlaylist ?? false,
@@ -101,7 +103,8 @@ internal sealed class AppSettings
         bool includeSubtitles = false,
         string? cookieFilePath = null,
         bool downloadPlaylist = false,
-        IReadOnlyList<RecentSearchSetting>? recentSearches = null)
+        IReadOnlyList<RecentSearchSetting>? recentSearches = null,
+        string? theme = null)
     {
         try
         {
@@ -111,13 +114,14 @@ internal sealed class AppSettings
                 LastOutputFolder = outputFolder,
                 UrlInputCount = urlInputCount,
                 OutputFormat = string.Equals(outputFormat, "MP3", StringComparison.OrdinalIgnoreCase) ? "MP3" : "MP4",
-                Mp4Quality = NormalizeQuality(mp4Quality),
+                Mp4Quality = YoutubeDownloadPolicy.NormalizeQuality(mp4Quality),
                 IncludeSubtitles = includeSubtitles,
                 DownloadPlaylist = downloadPlaylist,
                 TodayDownloadCount = todayDownloadCount,
                 TodayDate = todayDate ?? DateOnly.FromDateTime(DateTime.Now),
                 CookieFilePath = cookieFilePath,
-                RecentSearches = recentSearches?.Take(12).ToList() ?? []
+                RecentSearches = recentSearches?.Take(12).ToList() ?? [],
+                Theme = theme
             };
             var json = JsonSerializer.Serialize(settings, new JsonSerializerOptions { WriteIndented = true });
             File.WriteAllText(SettingsPath, json);
@@ -151,16 +155,4 @@ internal sealed class AppSettings
         }
     }
 
-    private static string NormalizeQuality(string? quality)
-    {
-        var q = (quality ?? "1080P").ToUpperInvariant();
-        return q switch
-        {
-            "4K" => "4K",
-            "480P" or "480" => "480P",
-            "720P" or "720" => "720P",
-            "1080P" or "1080" => "1080P",
-            _ => "1080P"
-        };
-    }
 }

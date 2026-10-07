@@ -21,7 +21,7 @@ using IoPath = System.IO.Path;
 
 namespace YoutubeOrBilibiliMP3Converter;
 
-public sealed class MainWindow : Window
+public sealed partial class MainWindow : Window
 {
     private static readonly string[] Mp4QualityOptions = ["480P", "720P", "1080P", "4K"];
     private static readonly Encoding Utf8Strict = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
@@ -60,7 +60,6 @@ public sealed class MainWindow : Window
 
     private readonly Dictionary<string, CollapsibleSection> _sections = new(StringComparer.Ordinal);
     private readonly HashSet<string> _expandedSections = new(StringComparer.Ordinal);
-    private ScrollViewer? _mainScroll;
     private readonly List<DownloadItemView> _downloadItems = [];
     private readonly List<SearchVideoResult> _searchResults = [];
     private readonly List<RecentSearchEntry> _recentSearches = [];
@@ -169,16 +168,18 @@ public sealed class MainWindow : Window
             _todayDownloads = 0;
         }
 
+        _shellTheme = ParseShellTheme(settings.Theme);
+
         Title = $"\u5f71\u97f3\u8f49\u63db\u5927\u5e2b v{PlatformCopy.DisplayVersion}";
         if (AppIconBitmap.Value is { } appIcon)
         {
             Icon = new WindowIcon(appIcon);
         }
-        Width = 1180;
-        Height = RuntimeInformation.IsOSPlatform(OSPlatform.OSX) ? 860 : 780;
-        MinWidth = 980;
-        MinHeight = RuntimeInformation.IsOSPlatform(OSPlatform.OSX) ? 720 : 680;
-        Background = BgApp;
+        Width = 1040;
+        Height = 700;
+        MinWidth = 880;
+        MinHeight = 600;
+        Background = Brush.Parse("#101418");
         FontFamily = new FontFamily(PlatformCopy.UiFontFamily);
 
         _urlBox = CreateInputBox("https://www.youtube.com/watch?v=... \u6216 Bilibili \u5f71\u7247\u7db2\u5740");
@@ -403,6 +404,7 @@ public sealed class MainWindow : Window
             _cookiesPathLabel.Foreground = TextMuted;
             SaveSettingsIfPossible();
             SetStatus("\u5df2\u6e05\u9664 Cookies \u6a94\u6848");
+            RefreshShellChrome();
         };
 
         _previewTitle = new TextBlock
@@ -607,35 +609,7 @@ public sealed class MainWindow : Window
         Closing += (_, _) => StopEmbeddedPreview(clearStatus: false);
     }
 
-    private Control BuildShell()
-    {
-        var root = new Grid
-        {
-            RowDefinitions = new RowDefinitions("*,Auto")
-        };
-
-        var main = new Border
-        {
-            Background = BgApp,
-            Padding = RuntimeInformation.IsOSPlatform(OSPlatform.OSX)
-                ? new Thickness(16, 10, 16, 8)
-                : new Thickness(18, 12, 18, 10),
-            Child = _mainScroll = new ScrollViewer
-            {
-                Content = _mainHost,
-                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled
-            }
-        };
-        root.Children.Add(main);
-
-        var footer = BuildFooter();
-        Grid.SetRow(footer, 1);
-        root.Children.Add(footer);
-
-        ShowHomePage();
-        return root;
-    }
+    private Control BuildShell() => CreateShellRoot();
 
     private Control BuildSectionsPanel()
     {
@@ -768,8 +742,9 @@ public sealed class MainWindow : Window
         }
     }
 
-    private void ScrollToTop() =>
-        Dispatcher.UIThread.Post(() => _mainScroll?.ScrollToHome(), DispatcherPriority.Background);
+    private void ScrollToTop()
+    {
+    }
 
     private void ShowHomePage()
     {
@@ -2152,6 +2127,7 @@ public sealed class MainWindow : Window
             _outputBox.Text = path;
             SaveSettingsIfPossible();
             SetStatus("\u8f38\u51fa\u8cc7\u6599\u593e\u5df2\u66f4\u65b0");
+            RefreshShellChrome();
         }
     }
 
@@ -2177,6 +2153,7 @@ public sealed class MainWindow : Window
             SaveSettingsIfPossible();
             SetStatus($"\u5df2\u532f\u5165 Cookies: {IoPath.GetFileName(path)}");
             AppendLog($"Cookies file: {path}");
+            RefreshShellChrome();
         }
     }
 
@@ -3510,7 +3487,9 @@ public sealed class MainWindow : Window
     private async Task<ParsedVideoInfo?> DumpVideoInfoAsync(
         string ytDlpPath,
         string url,
-        bool allowAutomaticBrowserCookies = true)
+        bool allowAutomaticBrowserCookies = true,
+        bool allowAutomaticForAnySite = false,
+        bool recordCookieFailure = true)
     {
         var startInfo = new ProcessStartInfo
         {
@@ -3529,7 +3508,11 @@ public sealed class MainWindow : Window
         startInfo.ArgumentList.Add("utf-8");
         AddYoutubeCompatibilityArguments(startInfo, url, fallback: false);
         AddBilibiliBrowserHeaders(startInfo, url);
-        var cookieSelection = AddCookieArguments(startInfo, url, allowAutomaticBrowserCookies);
+        var cookieSelection = AddCookieArguments(
+            startInfo,
+            url,
+            allowAutomaticBrowserCookies,
+            allowAutomaticForAnySite);
         if (cookieSelection is not null)
         {
             AppendLog($"Cookies: {cookieSelection.Label}");
@@ -3557,7 +3540,22 @@ public sealed class MainWindow : Window
             // Browser sessions are optional for public Bilibili videos. If automatic
             // extraction fails (locked/corrupt/stale profile), retry anonymously so an
             // unrelated local browser problem cannot block public video parsing.
-            if (cookieSelection?.IsAutomaticBrowser == true)
+            if (!allowAutomaticForAnySite && VideoAccess.LooksLikeAccountRequired(stderr))
+            {
+                AppendLog("這支影片需要登入，改用瀏覽器 Cookies 再讀一次。");
+                var unlocked = await DumpVideoInfoAsync(
+                    ytDlpPath,
+                    url,
+                    allowAutomaticBrowserCookies: true,
+                    allowAutomaticForAnySite: true,
+                    recordCookieFailure: false);
+                if (unlocked is not null)
+                {
+                    return unlocked;
+                }
+            }
+
+            if (cookieSelection?.IsAutomaticBrowser == true && recordCookieFailure)
             {
                 _automaticBrowserCookiesUnavailable = true;
                 AppendLog("\u81ea\u52d5\u8b80\u53d6\u700f\u89bd\u5668 Cookies \u5931\u6557\uff0c\u6539\u7528\u4e0d\u767b\u5165\u6a21\u5f0f\u91cd\u8a66\u3002");
@@ -3610,13 +3608,32 @@ public sealed class MainWindow : Window
             var availableDuration = ExtractMaxFormatDurationSeconds(root);
             var description = root.TryGetProperty("description", out var desc) ? desc.GetString() : null;
             var availability = root.TryGetProperty("availability", out var av) ? av.GetString() : null;
-            var (isPreviewOnly, accessWarning) = DetectLimitedAccess(
+            var (isPreviewOnly, accessWarning, accessKind) = DetectLimitedAccess(
                 title,
                 description,
                 availability,
                 duration,
                 availableDuration,
                 IsBilibiliVideoUrl(url));
+
+            _formatChoices = FormatChoiceBuilder.FromElement(root);
+
+            if (!allowAutomaticForAnySite
+                && cookieSelection is null
+                && VideoAccess.RequiresAccount(accessKind))
+            {
+                AppendLog("會員或付費影片，改用瀏覽器 Cookies 讀取可下載畫質。");
+                var unlocked = await DumpVideoInfoAsync(
+                    ytDlpPath,
+                    url,
+                    allowAutomaticBrowserCookies: true,
+                    allowAutomaticForAnySite: true,
+                    recordCookieFailure: false);
+                if (unlocked is not null)
+                {
+                    return unlocked;
+                }
+            }
 
             return new ParsedVideoInfo(
                 title,
@@ -3633,7 +3650,8 @@ public sealed class MainWindow : Window
                 ExpectedDurationSeconds: duration ?? availableDuration,
                 AvailableDurationSeconds: availableDuration,
                 IsPreviewOnly: isPreviewOnly,
-                AccessWarning: accessWarning);
+                AccessWarning: accessWarning,
+                Access: accessKind);
         }
         catch (Exception ex)
         {
@@ -3675,19 +3693,24 @@ public sealed class MainWindow : Window
             return "\u7121\u6cd5\u9023\u7dda\u5230\u5f71\u7247\u7db2\u7ad9\u3002\u8acb\u6aa2\u67e5\u7db2\u8def\u3001VPN \u6216\u9632\u706b\u7246\u8a2d\u5b9a\uff0c\u78ba\u8a8d\u539f\u9801\u53ef\u958b\u555f\u5f8c\u518d\u8a66\u3002";
         }
 
-        if (error.Contains("login", StringComparison.OrdinalIgnoreCase)
-            || error.Contains("Sign in", StringComparison.OrdinalIgnoreCase)
-            || error.Contains("members-only", StringComparison.OrdinalIgnoreCase)
-            || error.Contains("premium", StringComparison.OrdinalIgnoreCase)
-            || error.Contains("403", StringComparison.OrdinalIgnoreCase))
+        if (YoutubeDownloadPolicy.IsYouTubeUrl(url) && YoutubeDownloadPolicy.LooksLikeHttpForbidden(error))
         {
-            if (YoutubeDownloadPolicy.IsYouTubeUrl(url) && YoutubeDownloadPolicy.LooksLikeHttpForbidden(error))
-            {
-                return YoutubeDownloadPolicy.ForbiddenGiveUpHint(
-                    RuntimeInformation.IsOSPlatform(OSPlatform.OSX));
-            }
+            return YoutubeDownloadPolicy.ForbiddenGiveUpHint(
+                RuntimeInformation.IsOSPlatform(OSPlatform.OSX));
+        }
 
-            return "\u6b64\u5f71\u7247\u53ef\u80fd\u9700\u8981\u767b\u5165\u6216\u89c0\u770b\u6b0a\u9650\u3002\u8acb\u532f\u51fa cookies.txt \u4e26\u5728\u300cCookies \u6a94\u6848\u300d\u532f\u5165\uff0c\u518d\u91cd\u65b0\u89e3\u6790\u3002";
+        if (VideoAccess.LooksLikeAccountRequired(error)
+            || error.Contains("login", StringComparison.OrdinalIgnoreCase)
+            || error.Contains("Sign in", StringComparison.OrdinalIgnoreCase))
+        {
+            return VideoAccess.AccountRequiredHint();
+        }
+
+        if (error.Contains("403", StringComparison.OrdinalIgnoreCase))
+        {
+            return YoutubeDownloadPolicy.IsYouTubeUrl(url)
+                ? YoutubeDownloadPolicy.ForbiddenGiveUpHint(RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+                : "網站回傳 403。請更新 yt-dlp，或匯入已登入的 cookies.txt 後再試。";
         }
 
         if (error.Contains("Unsupported URL", StringComparison.OrdinalIgnoreCase))
@@ -3726,7 +3749,7 @@ public sealed class MainWindow : Window
         return max;
     }
 
-    private static (bool IsPreviewOnly, string? AccessWarning) DetectLimitedAccess(
+    private static (bool IsPreviewOnly, string? AccessWarning, VideoAccess.Kind Access) DetectLimitedAccess(
         string title,
         string? description,
         string? availability,
@@ -3734,41 +3757,52 @@ public sealed class MainWindow : Window
         double? availableDuration,
         bool isBilibili)
     {
-        var text = $"{title}\n{description ?? ""}";
-        var looksChargeExclusive =
-            text.Contains("\u5145\u7535\u4e13\u5c5e", StringComparison.OrdinalIgnoreCase)
-            || text.Contains("\u5145\u96fb\u5c08\u5c6c", StringComparison.OrdinalIgnoreCase)
-            || text.Contains("\u8a66\u770b", StringComparison.OrdinalIgnoreCase)
-            || text.Contains("\u8bd5\u770b", StringComparison.OrdinalIgnoreCase)
-            || text.Contains("\u4f1a\u5458\u4e13\u5c5e", StringComparison.OrdinalIgnoreCase)
-            || text.Contains("\u6703\u54e1\u5c08\u5c6c", StringComparison.OrdinalIgnoreCase)
-            || text.Contains("members-only", StringComparison.OrdinalIgnoreCase)
-            || text.Contains("member only", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(availability, "subscriber_only", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(availability, "premium_only", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(availability, "needs_auth", StringComparison.OrdinalIgnoreCase);
+        var access = VideoAccess.Classify(title, description, availability);
+        var previewInText = $"{title}\n{description}".Contains("試看", StringComparison.Ordinal)
+            || $"{title}\n{description}".Contains("试看", StringComparison.Ordinal);
 
         // Stream shorter than claimed length => free preview / locked full video.
         var durationMismatch = metadataDuration is > 30
             && availableDuration is > 0
             && availableDuration + 15 < metadataDuration * 0.85;
 
-        if (!durationMismatch && !looksChargeExclusive)
+        if (!durationMismatch && access == VideoAccess.Kind.Public && !previewInText)
         {
-            return (false, null);
+            return (false, null, VideoAccess.Kind.Public);
         }
 
-        if (isBilibili || looksChargeExclusive || durationMismatch)
+        if (!(isBilibili || access != VideoAccess.Kind.Public || durationMismatch || previewInText))
         {
-            var claimed = FormatDuration(metadataDuration);
-            var available = FormatDuration(availableDuration ?? metadataDuration);
-            var warning = durationMismatch
-                ? $"\u6b64\u5f71\u7247\u53ef\u80fd\u70ba\u300c\u5145\u96fb\u5c08\u5c6c\u300d\u6216\u6703\u54e1\u9650\u5236\uff1a\u5b8c\u6574\u7d04 {claimed}\uff0c\u76ee\u524d\u53ea\u80fd\u4e0b\u8f09\u8a66\u770b\u7d04 {available}\u3002\u8acb\u5148\u5c0d\u8a72 UP \u5305\u6708\u5145\u96fb\uff0c\u4e26\u7528\u5df2\u767b\u5165 B \u7ad9\u7684\u700f\u89bd\u5668 cookies \u518d\u4e0b\u8f09\u3002"
-                : "\u6b64\u5f71\u7247\u53ef\u80fd\u70ba\u300c\u5145\u96fb\u5c08\u5c6c\u300d/\u6703\u54e1\u9650\u5236\u5167\u5bb9\u3002\u672a\u89e3\u9396\u6642\u53ea\u80fd\u4e0b\u8f09\u8a66\u770b\u7247\u6bb5\uff1b\u8acb\u5148\u5c0d UP \u5305\u6708\u5145\u96fb\u4e26\u4f7f\u7528\u5df2\u767b\u5165\u7684\u700f\u89bd\u5668 cookies\u3002";
-            return (durationMismatch || looksChargeExclusive, warning);
+            return (false, null, access);
         }
 
-        return (false, null);
+        var claimed = FormatDuration(metadataDuration);
+        var available = FormatDuration(availableDuration ?? metadataDuration);
+        var badge = VideoAccess.Badge(access);
+        string warning;
+        if (durationMismatch)
+        {
+            var name = badge ?? "限制";
+            warning = $"{name}：完整約 {claimed}，目前讀到約 {available}。仍可下載，程式會帶已登入的 cookies 盡量取得完整版。";
+        }
+        else if (access == VideoAccess.Kind.Paid)
+        {
+            warning = "付費影片。仍可下載；帳號需已購買或開通，並使用已登入的 cookies。";
+        }
+        else if (access == VideoAccess.Kind.Member)
+        {
+            warning = "會員影片。仍可下載；帳號需有這個頻道的會員資格，並使用已登入的 cookies。";
+        }
+        else if (access == VideoAccess.Kind.NeedsLogin)
+        {
+            warning = "這支影片需要登入。仍可下載；請用已登入的瀏覽器 cookies，或在設定匯入 cookies.txt。";
+        }
+        else
+        {
+            warning = $"可能是試看片段（約 {available}）。仍可下載；完整版需要已登入的 cookies。";
+        }
+
+        return (durationMismatch, warning, access);
     }
 
     private async Task<ParsedVideoInfo?> DumpChannelInfoAsync(string ytDlpPath, string channelUrl)
@@ -4726,6 +4760,11 @@ public sealed class MainWindow : Window
 
     private async Task ConvertOrCancelCoreAsync()
     {
+        if (_shellCancelRequested)
+        {
+            return;
+        }
+
         if (_conversionTokenSource is not null)
         {
             SetStatus("\u5df2\u6709\u8f49\u63db\u4efb\u52d9\u9032\u884c\u4e2d");
@@ -4980,6 +5019,9 @@ public sealed class MainWindow : Window
         DownloadItemView? item)
     {
         _lastRunForbidden = false;
+        var needsAccount = VideoNeedsAccount(url);
+        FlushLogToUi(force: true);
+        var logAtStart = _logText.Text?.Length ?? 0;
         var firstAttempt = await RunYtDlpAttemptAsync(
             ytDlpPath,
             ffmpegPath,
@@ -4991,14 +5033,43 @@ public sealed class MainWindow : Window
             includeSubtitles,
             token,
             item,
-            allowAutomaticBrowserCookies: true);
+            allowAutomaticBrowserCookies: true,
+            allowAutomaticForAnySite: needsAccount);
 
         if (firstAttempt.ExitCode == 0)
         {
             return 0;
         }
 
-        if (CookieRetryPolicy.ShouldRetryWithoutAutomaticCookies(
+        if (!needsAccount
+            && !firstAttempt.UsedAutomaticBrowserCookies
+            && VideoAccess.LooksLikeAccountRequired(LogSince(logAtStart)))
+        {
+            needsAccount = true;
+            AppendLog("偵測到會員或付費限制，改用瀏覽器 Cookies 再下載。");
+            SetStatus("這是會員或付費影片，正在用登入狀態重試…");
+            _lastRunForbidden = false;
+            firstAttempt = await RunYtDlpAttemptAsync(
+                ytDlpPath,
+                ffmpegPath,
+                ffprobePath,
+                url,
+                outputPath,
+                outputFormat,
+                mp4Quality,
+                includeSubtitles,
+                token,
+                item,
+                allowAutomaticBrowserCookies: true,
+                allowAutomaticForAnySite: true);
+            if (firstAttempt.ExitCode == 0)
+            {
+                return 0;
+            }
+        }
+
+        if (!needsAccount
+            && CookieRetryPolicy.ShouldRetryWithoutAutomaticCookies(
                 firstAttempt.ExitCode,
                 firstAttempt.UsedAutomaticBrowserCookies))
         {
@@ -5022,6 +5093,12 @@ public sealed class MainWindow : Window
             {
                 return 0;
             }
+        }
+
+        if (needsAccount && firstAttempt.ExitCode != 0 && !_lastRunForbidden)
+        {
+            AppendLog(VideoAccess.AccountRequiredHint());
+            SetStatus(VideoAccess.AccountRequiredHint());
         }
 
         if (YoutubeDownloadPolicy.IsYouTubeUrl(url) && _lastRunForbidden)
@@ -5055,6 +5132,24 @@ public sealed class MainWindow : Window
         }
 
         return firstAttempt.ExitCode;
+    }
+
+    private string LogSince(int mark)
+    {
+        FlushLogToUi(force: true);
+        var text = _logText.Text ?? "";
+        return text.Length <= mark ? "" : text[mark..];
+    }
+
+    private bool VideoNeedsAccount(string url)
+    {
+        if (_parsedInfo is null || !VideoAccess.RequiresAccount(_parsedInfo.Access))
+        {
+            return false;
+        }
+
+        return UrlsLikelySameVideo(_parsedInfo.Url, url)
+            || UrlsLikelySameVideo(_parsedInfo.WebpageUrl, url);
     }
 
     private async Task<YtDlpAttemptResult> RunYtDlpAttemptAsync(
@@ -6159,6 +6254,12 @@ public sealed class MainWindow : Window
             return;
         }
 
+        if (line.Contains("[Merger]", StringComparison.OrdinalIgnoreCase)
+            || line.Contains("[ExtractAudio]", StringComparison.OrdinalIgnoreCase))
+        {
+            NotifyShellProcessing();
+        }
+
         AppendLog(line);
         TryUpdateProgress(line, item);
 
@@ -6237,6 +6338,7 @@ public sealed class MainWindow : Window
         _lastProgressUiUtc = now;
         UpdateFooter();
         item?.SetProgress(percent, $"{percent:0.#}%  ({speed})");
+        NotifyShellProgress(percent, speed);
     }
 
     private static string DecodeProcessText(byte[] bytes)
@@ -6308,6 +6410,7 @@ public sealed class MainWindow : Window
         var ready = ytDlp is not null && ffmpeg is not null && ffprobe is not null;
         var wasMissing = _toolsMissing;
         _toolsMissing = !ready;
+        var changed = wasMissing != _toolsMissing;
 
         if (ready)
         {
@@ -6321,11 +6424,13 @@ public sealed class MainWindow : Window
                 AppendLog($"ffprobe: {ffprobe}");
             }
 
+            OnShellToolStateChanged(changed);
             return true;
         }
 
         BuildToolSetupContent(ytDlp is not null, ffmpeg is not null && ffprobe is not null);
         _toolSetupPanel.IsVisible = true;
+        OnShellToolStateChanged(changed);
         return false;
     }
 
@@ -6499,6 +6604,11 @@ public sealed class MainWindow : Window
 
     private void SetBusy(bool busy)
     {
+        if (busy)
+        {
+            _shellSawDownload = true;
+        }
+
         _parseButton.IsEnabled = !busy;
         _pasteButton.IsEnabled = !busy;
         _browseButton.IsEnabled = !busy;
@@ -6563,21 +6673,12 @@ public sealed class MainWindow : Window
                     Platform = e.Platform,
                     SearchedAtUtc = e.SearchedAtUtc
                 })
-                .ToList());
+                .ToList(),
+            _shellTheme.ToString().ToLowerInvariant());
     }
 
-    private static string NormalizeMp4Quality(string? quality)
-    {
-        var q = (quality ?? "1080P").ToUpperInvariant();
-        return q switch
-        {
-            "4K" => "4K",
-            "480P" or "480" => "480P",
-            "720P" or "720" => "720P",
-            "1080P" or "1080" => "1080P",
-            _ => "1080P"
-        };
-    }
+    private static string NormalizeMp4Quality(string? quality) =>
+        YoutubeDownloadPolicy.NormalizeQuality(quality);
 
     private static string FormatDuration(double? seconds)
     {
@@ -6615,7 +6716,14 @@ public sealed class MainWindow : Window
     }
 
     private void SetStatus(string text) =>
-        Dispatcher.UIThread.Post(() => _statusText.Text = text, DispatcherPriority.Normal);
+        Dispatcher.UIThread.Post(() =>
+        {
+            _statusText.Text = text;
+            if (_shellStatusLine is not null)
+            {
+                _shellStatusLine.Text = text;
+            }
+        }, DispatcherPriority.Normal);
 
     private void AppendLog(string? line)
     {
@@ -6815,7 +6923,8 @@ public sealed class MainWindow : Window
         double? ExpectedDurationSeconds = null,
         double? AvailableDurationSeconds = null,
         bool IsPreviewOnly = false,
-        string? AccessWarning = null);
+        string? AccessWarning = null,
+        VideoAccess.Kind Access = VideoAccess.Kind.Public);
 
     private sealed record SearchVideoResult(
         string Platform,

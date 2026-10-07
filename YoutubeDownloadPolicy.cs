@@ -18,15 +18,42 @@ internal static class YoutubeDownloadPolicy
             || host.Contains("youtube-nocookie.com", StringComparison.OrdinalIgnoreCase);
     }
 
+    public static int ParseMaxHeight(string? mp4Quality)
+    {
+        var raw = (mp4Quality ?? "1080P").Trim().ToUpperInvariant();
+        if (raw is "4K" or "2160" or "2160P")
+        {
+            return 2160;
+        }
+
+        if (raw.EndsWith('P'))
+        {
+            raw = raw[..^1];
+        }
+
+        return int.TryParse(raw, out var height) && height > 0 ? height : 1080;
+    }
+
+    public static string NormalizeQuality(string? quality)
+    {
+        var raw = (quality ?? "").Trim().ToUpperInvariant();
+        if (raw is "4K" or "2160" or "2160P")
+        {
+            return "4K";
+        }
+
+        var digits = raw.EndsWith('P') ? raw[..^1] : raw;
+        if (int.TryParse(digits, out var height) && height > 0)
+        {
+            return $"{height}P";
+        }
+
+        return "1080P";
+    }
+
     public static string GetMp4FormatSelector(string? mp4Quality)
     {
-        var maxHeight = (mp4Quality ?? "1080P").ToUpperInvariant() switch
-        {
-            "4K" => 2160,
-            "720P" or "720" => 720,
-            "480P" or "480" => 480,
-            _ => 1080
-        };
+        var maxHeight = ParseMaxHeight(mp4Quality);
 
         // Prefer H.264 + AAC. AV1/WebM (399+251) is more likely to 403 on YouTube.
         return $"bestvideo[height<={maxHeight}][vcodec^=avc1]+bestaudio[acodec^=mp4a]/" +

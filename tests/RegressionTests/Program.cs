@@ -56,6 +56,32 @@ try
         "1080P selector must cap height");
     AssertTrue(YoutubeDownloadPolicy.GetMp4FormatSelector("4K").Contains("height<=2160", StringComparison.Ordinal),
         "4K selector must allow 2160");
+    AssertTrue(YoutubeDownloadPolicy.GetMp4FormatSelector("1440P").Contains("height<=1440", StringComparison.Ordinal),
+        "1440P selector must cap height at 1440");
+    AssertEqual("720P", YoutubeDownloadPolicy.NormalizeQuality("720"),
+        "Bare heights normalize to the P suffix");
+    AssertEqual("4K", YoutubeDownloadPolicy.NormalizeQuality("2160p"),
+        "2160p is stored as 4K");
+
+    var choices = FormatChoiceBuilder.FromJson("""
+        {
+          "formats": [
+            {"ext":"mp4","vcodec":"avc1","acodec":"mp4a","height":360,"tbr":500,"filesize":1000},
+            {"ext":"mp4","vcodec":"avc1","acodec":"none","height":1080,"tbr":4000,"filesize":5000000},
+            {"ext":"m4a","vcodec":"none","acodec":"mp4a","abr":128,"filesize":800000},
+            {"ext":"mhtml","vcodec":"images","acodec":"none","height":100,"tbr":1}
+          ]
+        }
+        """);
+    AssertEqual("1080P", choices[0].Quality, "Highest video height is listed first");
+    AssertTrue(choices[0].Label.Contains("1080p · mp4", StringComparison.Ordinal)
+        && choices[0].Label.Contains("MB", StringComparison.Ordinal),
+        "Video rows include height, container, and estimated size");
+    AssertEqual("audio", choices[^1].Kind, "Audio-only mp3 is the last row");
+    AssertTrue(choices[^1].Label.StartsWith("僅音訊", StringComparison.Ordinal),
+        "Audio row is labeled in Chinese");
+    AssertFalse(choices.Any(choice => choice.Label.StartsWith("100p", StringComparison.Ordinal)),
+        "Storyboard images are not download choices");
 
     AssertTrue(YoutubeDownloadPolicy.LooksLikeHttpForbidden(
             "ERROR: unable to download video data: HTTP Error 403: Forbidden"),
@@ -113,6 +139,49 @@ try
         "macOS installer script must be runnable by Terminal");
     AssertTrue(macScript.Contains("brew install yt-dlp ffmpeg", StringComparison.Ordinal),
         "macOS installer script installs both tools");
+
+    AssertEqual("會員影片", VideoAccess.Badge(VideoAccess.Classify("普通標題", null, "subscriber_only")),
+        "YouTube subscriber_only is labeled as a member video");
+    AssertEqual("付費影片", VideoAccess.Badge(VideoAccess.Classify("【充电专属】完整版", null, null)),
+        "Bilibili charge-exclusive titles are labeled as paid");
+    AssertEqual("會員影片", VideoAccess.Badge(VideoAccess.Classify("【会员专属】直播回放", "公开说明", "public")),
+        "Member-only titles stay labeled even when availability says public");
+    AssertEqual("付費影片", VideoAccess.Badge(VideoAccess.Classify("電影", null, "premium_only")),
+        "premium_only is a paid video");
+    AssertEqual(null, VideoAccess.Badge(VideoAccess.Classify("一般影片", "public description", "public")),
+        "Public videos have no access badge");
+    AssertTrue(VideoAccess.RequiresAccount(VideoAccess.Kind.Member)
+        && VideoAccess.RequiresAccount(VideoAccess.Kind.Paid),
+        "Member and paid videos must stay downloadable with an account");
+    AssertTrue(VideoAccess.LooksLikeAccountRequired(
+            "ERROR: [youtube] abc: Join this channel to get access to members-only content"),
+        "yt-dlp members-only errors must request cookies");
+    AssertFalse(VideoAccess.LooksLikeAccountRequired("[download] 100%"),
+        "Progress lines are not access errors");
+
+    var memberFailure = DownloadFailureText.Summarize(
+        "正在轉換 1/1...",
+        "ERROR: [youtube] abc: Join this channel to get access to members-only content\n轉換失敗，結束碼 1",
+        isMac: true);
+    AssertTrue(memberFailure.Contains("會員或付費", StringComparison.Ordinal),
+        "Member download failures explain that cookies are required");
+    AssertFalse(memberFailure.Contains("正在轉換", StringComparison.Ordinal),
+        "The progress status is not the failure reason");
+
+    var forbidden = DownloadFailureText.Summarize(
+        "正在轉換 1/1...",
+        "ERROR: unable to download video data: HTTP Error 403: Forbidden\n轉換失敗，結束碼 1",
+        isMac: true);
+    AssertTrue(forbidden.Contains("403", StringComparison.Ordinal),
+        "403 failures keep the YouTube hint");
+    AssertFalse(forbidden.Contains("正在轉換", StringComparison.Ordinal),
+        "403 failures do not repeat the progress status");
+
+    var bare = DownloadFailureText.Summarize("正在轉換 1/1...", "轉換失敗，結束碼 1", isMac: true);
+    AssertTrue(bare.Contains("結束碼 1", StringComparison.Ordinal),
+        "A bare exit code is still reported");
+    AssertFalse(bare.StartsWith("正在轉換", StringComparison.Ordinal),
+        "A bare failure does not lead with the progress status");
 
     Console.WriteLine("PASS: cookie handling regression tests");
     Console.WriteLine("PASS: YouTube 403 / Mac copy regression tests");

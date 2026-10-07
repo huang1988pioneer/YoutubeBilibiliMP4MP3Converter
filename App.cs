@@ -11,7 +11,7 @@ public sealed class App : Application
     {
         Name = "影音轉換大師";
         Styles.Add(new FluentTheme());
-        RequestedThemeVariant = ThemeVariant.Light;
+        RequestedThemeVariant = ThemeVariant.Default;
     }
 
     public override void OnFrameworkInitializationCompleted()

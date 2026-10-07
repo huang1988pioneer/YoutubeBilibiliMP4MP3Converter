@@ -157,6 +157,12 @@ package_macos() {
   write_usage "$STAGE/pack/${rid}/README.txt" "macOS"
   tar -czf "$DIST/$tar_name" -C "$STAGE/pack/$rid" "${NAME}.app" README.txt
   echo "created $DIST/$tar_name"
+  local zip_name="${NAME}-v${VERSION}-${rid}.zip"
+  (
+    cd "$STAGE/pack/$rid"
+    zip -qry "$DIST/$zip_name" "${NAME}.app" README.txt
+  )
+  echo "created $DIST/$zip_name"
 }
 
 package_linux() {
