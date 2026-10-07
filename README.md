@@ -1,4 +1,4 @@
-# 影音轉換大師 v1.5.1
+# 影音轉換大師 v1.5.2
 
 Avalonia 桌面應用：將 **YouTube** 或 **Bilibili** 影片網址轉換成 **MP4 / MP3**（本機使用 `yt-dlp` + `ffmpeg`）。
 
