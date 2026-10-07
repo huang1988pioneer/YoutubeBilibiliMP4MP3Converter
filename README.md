@@ -1,4 +1,4 @@
-# 影音轉換大師 v1.4.0
+# 影音轉換大師 v1.5.0
 
 Avalonia 桌面應用：將 **YouTube** 或 **Bilibili** 影片網址轉換成 **MP4 / MP3**（本機使用 `yt-dlp` + `ffmpeg`）。
 
@@ -29,7 +29,8 @@ dotnet run
 | `…-osx-arm64.dmg` | macOS Apple Silicon | 開啟後把 App 拖進「應用程式」 |
 | `…-osx-x64.dmg` | macOS Intel | 同上 |
 | `…-linux-x64` | Linux x64 | 單一執行檔（`chmod +x` 後執行） |
-| `….zip` / `….tar.gz` | 各平台 | 資料夾版，內容與上面相同 |
+| `…-osx-arm64.zip` / `…-osx-x64.zip` | macOS | `.app` 壓縮檔，解壓後拖進「應用程式」 |
+| `…-win-x64.zip` / `….tar.gz` | Windows / 各平台 | 資料夾版，內容與上面相同 |
 
 macOS 版未經 Apple 公證，第一次開啟若被擋，請在 App 上按右鍵 →「打開」。
 
