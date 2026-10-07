@@ -108,7 +108,7 @@ try
         "Windows footer keeps the Windows label");
     var assemblyVersion = typeof(PlatformCopy).Assembly.GetName().Version;
     var expectedVersion = assemblyVersion is null
-        ? "1.5.3"
+        ? "1.5.4"
         : $"{assemblyVersion.Major}.{assemblyVersion.Minor}.{assemblyVersion.Build}";
     AssertEqual(expectedVersion, PlatformCopy.DisplayVersion,
         "Footer/title version must come from the assembly");
