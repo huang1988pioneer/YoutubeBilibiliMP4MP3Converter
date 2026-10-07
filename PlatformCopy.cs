@@ -9,7 +9,7 @@ internal static class PlatformCopy
         get
         {
             var version = typeof(PlatformCopy).Assembly.GetName().Version;
-            return version is null ? "1.5.0" : $"{version.Major}.{version.Minor}.{version.Build}";
+            return version is null ? "1.5.1" : $"{version.Major}.{version.Minor}.{version.Build}";
         }
     }
 
