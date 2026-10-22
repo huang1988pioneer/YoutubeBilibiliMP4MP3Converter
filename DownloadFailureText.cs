@@ -16,6 +16,13 @@ internal static class DownloadFailureText
                 : VideoAccess.AccountRequiredHint() + "\n" + useful;
         }
 
+        // An outdated yt-dlp is the root cause behind most 403s, so name it before
+        // sending anyone off to export cookies.txt.
+        if (YoutubeDownloadPolicy.LooksLikeOutdatedYtDlp(log))
+        {
+            return YoutubeDownloadPolicy.OutdatedYtDlpFailureHint(isMac);
+        }
+
         if (YoutubeDownloadPolicy.LooksLikeHttpForbidden(useful) || YoutubeDownloadPolicy.LooksLikeHttpForbidden(log))
         {
             return YoutubeDownloadPolicy.ForbiddenGiveUpHint(isMac);
@@ -78,6 +85,7 @@ internal static class DownloadFailureText
         || line.StartsWith("偵測到會員或付費限制", StringComparison.Ordinal)
         || line.StartsWith("這支影片需要登入，改用", StringComparison.Ordinal)
         || line.StartsWith("會員或付費影片，改用", StringComparison.Ordinal)
+        || line.StartsWith("yt-dlp 版本過舊", StringComparison.Ordinal)
         || (line.StartsWith("[", StringComparison.Ordinal) && line.Contains("] http", StringComparison.Ordinal));
 
     private static string Trim(string line) => line.Length <= 280 ? line : line[..280];

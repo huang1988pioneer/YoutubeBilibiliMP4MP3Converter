@@ -145,6 +145,11 @@ public sealed partial class MainWindow : Window
     private bool _lastRunForbidden;
     private bool _warnedOutdatedYtDlp;
 
+    // Which browser cookie source is currently in use. yt-dlp can fail to read one
+    // browser (Chrome's database is locked while Chrome runs) while another works,
+    // so failures advance this index instead of giving up on cookies entirely.
+    private int _browserCookieIndex;
+
     // UI update throttling — high-frequency yt-dlp output previously flooded the UI thread
     // and froze/crashed the app during download.
     private readonly object _logLock = new();
@@ -3557,6 +3562,20 @@ public sealed partial class MainWindow : Window
 
             if (cookieSelection?.IsAutomaticBrowser == true && recordCookieFailure)
             {
+                // One unreadable browser is not proof that cookies are useless here:
+                // Chrome keeps its database locked while running. Try the next browser
+                // before dropping to an anonymous request that Bilibili risk-control blocks.
+                if (TryAdvanceBrowserCookies())
+                {
+                    AppendLog($"\u700f\u89bd\u5668 Cookies \u8b80\u53d6\u5931\u6557\uff0c\u6539\u7528\u5176\u4ed6\u700f\u89bd\u5668\u91cd\u8a66\u3002");
+                    return await DumpVideoInfoAsync(
+                        ytDlpPath,
+                        url,
+                        allowAutomaticBrowserCookies: true,
+                        allowAutomaticForAnySite: allowAutomaticForAnySite,
+                        recordCookieFailure: true);
+                }
+
                 _automaticBrowserCookiesUnavailable = true;
                 AppendLog("\u81ea\u52d5\u8b80\u53d6\u700f\u89bd\u5668 Cookies \u5931\u6557\uff0c\u6539\u7528\u4e0d\u767b\u5165\u6a21\u5f0f\u91cd\u8a66\u3002");
                 return await DumpVideoInfoAsync(ytDlpPath, url, allowAutomaticBrowserCookies: false);
@@ -3716,6 +3735,18 @@ public sealed partial class MainWindow : Window
         if (error.Contains("Unsupported URL", StringComparison.OrdinalIgnoreCase))
         {
             return "\u9019\u4e0d\u662f\u53ef\u8fa8\u8b58\u7684 YouTube \u6216 Bilibili \u5f71\u7247\u7db2\u5740\u3002\u8acb\u5f9e\u5f71\u7247\u539f\u9801\u8907\u88fd\u5b8c\u6574\u7db2\u5740\u5f8c\u91cd\u8a66\u3002";
+        }
+
+        // Bilibili answers anonymous requests from flagged IPs with a captcha page instead of
+        // a video page, which yt-dlp reports as "Unable to extract initial state". Telling the
+        // user to "check the page still plays" is useless here — it plays fine in a browser.
+        if (IsBilibiliVideoUrl(url)
+            && (error.Contains("Unable to extract initial state", StringComparison.OrdinalIgnoreCase)
+                || error.Contains("risk-captcha", StringComparison.OrdinalIgnoreCase)))
+        {
+            return "Bilibili 這次回傳的是風控驗證頁，不是影片頁（常見於海外 IP 或匿名請求）。"
+                + "請用瀏覽器開啟 bilibili.com 完成驗證，並保持該瀏覽器登入；"
+                + "或在「Cookies 檔案」匯入該瀏覽器的 cookies.txt 後重試。";
         }
 
         var cookieHint = cookieSelection is not null
@@ -5073,6 +5104,36 @@ public sealed partial class MainWindow : Window
                 firstAttempt.ExitCode,
                 firstAttempt.UsedAutomaticBrowserCookies))
         {
+            // Same reasoning as the parse path: retry with another browser's cookies
+            // before falling back to anonymous access.
+            while (TryAdvanceBrowserCookies())
+            {
+                AppendLog("\u700f\u89bd\u5668 Cookies \u7121\u6cd5\u7528\u65bc\u4e0b\u8f09\uff0c\u6539\u7528\u5176\u4ed6\u700f\u89bd\u5668\u91cd\u8a66\u3002");
+                item?.SetProgress(0, "\u6539\u7528\u5176\u4ed6\u700f\u89bd\u5668 Cookies");
+                _lastRunForbidden = false;
+                firstAttempt = await RunYtDlpAttemptAsync(
+                    ytDlpPath,
+                    ffmpegPath,
+                    ffprobePath,
+                    url,
+                    outputPath,
+                    outputFormat,
+                    mp4Quality,
+                    includeSubtitles,
+                    token,
+                    item,
+                    allowAutomaticBrowserCookies: true);
+                if (firstAttempt.ExitCode == 0)
+                {
+                    return 0;
+                }
+
+                if (!firstAttempt.UsedAutomaticBrowserCookies)
+                {
+                    break;
+                }
+            }
+
             _automaticBrowserCookiesUnavailable = true;
             AppendLog("\u700f\u89bd\u5668 Cookies \u7121\u6cd5\u7528\u65bc\u4e0b\u8f09\uff0c\u6539\u7528\u4e0d\u767b\u5165\u6a21\u5f0f\u91cd\u8a66\u3002");
             item?.SetProgress(0, "\u6539\u7528\u516c\u958b\u6a21\u5f0f\u91cd\u8a66");
@@ -6028,7 +6089,7 @@ public sealed partial class MainWindow : Window
             return null;
         }
 
-        var browser = FindBrowserWithCookies();
+        var browser = BrowserWithCookies();
         if (browser is null)
         {
             return null;
@@ -6039,22 +6100,84 @@ public sealed partial class MainWindow : Window
         return new CookieSelection($"\u700f\u89bd\u5668 {browser}", IsAutomaticBrowser: true);
     }
 
-    private static string? FindBrowserWithCookies()
+    private static IReadOnlyList<string> FindBrowsersWithCookies()
     {
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
         {
-            return BrowserCookieLocator.FindWindowsBrowser(
+            return PreferIdleBrowsers(BrowserCookieLocator.FindWindowsBrowsers(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData));
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData)));
         }
 
         if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
         {
-            return BrowserCookieLocator.FindMacBrowser(
-                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
+            return PreferIdleBrowsers(BrowserCookieLocator.FindMacBrowsers(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)));
         }
 
-        return null;
+        return [];
+    }
+
+    /// <summary>
+    /// A running browser keeps its cookie database locked, so yt-dlp cannot copy it
+    /// ("Could not copy Chrome cookie database"). Try the idle browsers first; a running
+    /// one still stays in the list as a last resort.
+    /// </summary>
+    private static IReadOnlyList<string> PreferIdleBrowsers(IReadOnlyList<string> browsers)
+    {
+        if (browsers.Count < 2)
+        {
+            return browsers;
+        }
+
+        var idle = new List<string>();
+        var running = new List<string>();
+        foreach (var browser in browsers)
+        {
+            (IsBrowserRunning(browser) ? running : idle).Add(browser);
+        }
+
+        idle.AddRange(running);
+        return idle;
+    }
+
+    private static bool IsBrowserRunning(string browser)
+    {
+        var processName = browser switch
+        {
+            "edge" => "msedge",
+            _ => browser
+        };
+
+        try
+        {
+            return Process.GetProcessesByName(processName).Length > 0;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private string? BrowserWithCookies()
+    {
+        var browsers = FindBrowsersWithCookies();
+        return _browserCookieIndex < browsers.Count ? browsers[_browserCookieIndex] : null;
+    }
+
+    /// <summary>
+    /// Moves to the next browser that has cookies. Returns false once every candidate has
+    /// been tried, which is the signal to fall back to an anonymous request.
+    /// </summary>
+    private bool TryAdvanceBrowserCookies()
+    {
+        if (_browserCookieIndex + 1 >= FindBrowsersWithCookies().Count)
+        {
+            return false;
+        }
+
+        _browserCookieIndex++;
+        return true;
     }
 
     private static string NormalizeMediaUrl(string url, bool preservePlaylistParams = false)

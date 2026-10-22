@@ -16,6 +16,8 @@ try
     File.WriteAllText(chromeCookies, "fixture");
     AssertEqual("chrome", BrowserCookieLocator.FindWindowsBrowser(local, roaming),
         "Chrome is selected only when its cookie database exists");
+    AssertEqual("chrome", string.Join(",", BrowserCookieLocator.FindWindowsBrowsers(local, roaming)),
+        "A Chrome-only machine offers exactly one cookie source");
 
     File.Delete(chromeCookies);
     var firefoxCookies = Path.Combine(roaming, "Mozilla", "Firefox", "Profiles", "profile.default", "cookies.sqlite");
@@ -23,6 +25,16 @@ try
     File.WriteAllText(firefoxCookies, "fixture");
     AssertEqual("firefox", BrowserCookieLocator.FindWindowsBrowser(local, roaming),
         "Firefox profile is detected by cookies.sqlite");
+    AssertEqual("firefox", string.Join(",", BrowserCookieLocator.FindWindowsBrowsers(local, roaming)),
+        "Chrome's locked cookie database must not hide Firefox as a fallback");
+
+    // Both present: Chrome is preferred, but Firefox stays available as the next candidate
+    // because yt-dlp cannot copy Chrome's database while Chrome is running.
+    File.WriteAllText(chromeCookies, "fixture");
+    AssertEqual("chrome,firefox", string.Join(",", BrowserCookieLocator.FindWindowsBrowsers(local, roaming)),
+        "Every usable browser is listed so a failed one can be skipped");
+    AssertEqual("chrome", BrowserCookieLocator.FindWindowsBrowser(local, roaming),
+        "The single-browser helper still returns the preferred source");
 
     AssertTrue(CookieRetryPolicy.ShouldRetryWithoutAutomaticCookies(exitCode: 1, usedAutomaticCookies: true),
         "Failed automatic browser cookies must retry anonymously");
@@ -182,8 +194,37 @@ try
         isMac: true);
     AssertTrue(forbidden.Contains("403", StringComparison.Ordinal),
         "403 failures keep the YouTube hint");
+    AssertTrue(forbidden.Contains("cookies.txt", StringComparison.Ordinal),
+        "A plain 403 still suggests importing cookies");
     AssertFalse(forbidden.Contains("正在轉換", StringComparison.Ordinal),
         "403 failures do not repeat the progress status");
+
+    // A 403 that comes with yt-dlp's own "older than 90 days" warning has one real fix:
+    // update yt-dlp. Sending the user to cookies.txt first is a dead end.
+    var outdatedForbidden = DownloadFailureText.Summarize(
+        "正在轉換 1/1...",
+        "WARNING: Your yt-dlp version (2026.07.04) is older than 90 days!\n"
+        + "ERROR: unable to download video data: HTTP Error 403: Forbidden\n轉換失敗，結束碼 1",
+        isMac: false);
+    AssertTrue(outdatedForbidden.Contains("winget upgrade yt-dlp.yt-dlp", StringComparison.Ordinal),
+        "An outdated yt-dlp 403 must name the Windows update command");
+    AssertFalse(outdatedForbidden.Contains("cookies.txt", StringComparison.Ordinal),
+        "An outdated yt-dlp must be fixed before cookies are suggested");
+
+    var outdatedForbiddenMac = DownloadFailureText.Summarize(
+        "正在轉換 1/1...",
+        "WARNING: Your yt-dlp version (2026.07.04) is older than 90 days!\n"
+        + "ERROR: unable to download video data: HTTP Error 403: Forbidden",
+        isMac: true);
+    AssertTrue(outdatedForbiddenMac.Contains("brew upgrade yt-dlp", StringComparison.Ordinal),
+        "The macOS variant names brew upgrade");
+
+    // Our own hint lines must never be echoed back as the failure reason.
+    AssertEqual("ERROR: unable to download video data: HTTP Error 403: Forbidden",
+        DownloadFailureText.PickUsefulLine(
+            "yt-dlp 版本過舊（已超過 90 天），YouTube 容易出現 403。請在終端機執行：winget upgrade yt-dlp.yt-dlp\n"
+            + "ERROR: unable to download video data: HTTP Error 403: Forbidden"),
+        "The outdated hint itself is not the failure line");
 
     var bare = DownloadFailureText.Summarize("正在轉換 1/1...", "轉換失敗，結束碼 1", isMac: true);
     AssertTrue(bare.Contains("結束碼 1", StringComparison.Ordinal),

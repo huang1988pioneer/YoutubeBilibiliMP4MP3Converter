@@ -108,8 +108,17 @@ internal static class YoutubeDownloadPolicy
 
     public static string OutdatedYtDlpHint(bool isMac) =>
         isMac
-            ? "yt-dlp \u7248\u672c\u904e\u820a\uff0cYouTube \u5bb9\u6613\u51fa\u73fe 403\u3002\u8acb\u5728\u7d42\u7aef\u6a5f\u57f7\u884c\uff1abrew upgrade yt-dlp"
-            : "yt-dlp \u7248\u672c\u904e\u820a\uff0cYouTube \u5bb9\u6613\u51fa\u73fe 403\u3002\u8acb\u66f4\u65b0 yt-dlp \u5f8c\u518d\u8a66\u3002";
+            ? "yt-dlp \u7248\u672c\u904e\u820a\uff08\u5df2\u8d85\u904e 90 \u5929\uff09\uff0cYouTube \u5bb9\u6613\u51fa\u73fe 403\u3002\u8acb\u5728\u7d42\u7aef\u6a5f\u57f7\u884c\uff1abrew upgrade yt-dlp"
+            : "yt-dlp \u7248\u672c\u904e\u820a\uff08\u5df2\u8d85\u904e 90 \u5929\uff09\uff0cYouTube \u5bb9\u6613\u51fa\u73fe 403\u3002\u8acb\u5728\u7d42\u7aef\u6a5f\u57f7\u884c\uff1awinget upgrade yt-dlp.yt-dlp\uff08\u6216 yt-dlp -U\uff09\u5f8c\u518d\u8a66\u3002";
+
+    /// <summary>
+    /// Shown when a 403 happens and yt-dlp itself reported being older than 90 days.
+    /// Updating yt-dlp is then the actual fix; asking for cookies.txt first wastes the user's time.
+    /// </summary>
+    public static string OutdatedYtDlpFailureHint(bool isMac) =>
+        isMac
+            ? "YouTube 回傳 403，而且目前 yt-dlp 已超過 90 天未更新。請先更新：brew upgrade yt-dlp，更新後再試一次。"
+            : "YouTube 回傳 403，而且目前 yt-dlp 已超過 90 天未更新。請先更新：winget upgrade yt-dlp.yt-dlp（或 yt-dlp -U），更新後再試一次。";
 
     public static string ForbiddenRetryHint() =>
         "YouTube \u62d2\u7d55\u4e0b\u8f09\uff08403\uff09\u3002\u6b63\u5728\u6539\u7528\u76f8\u5bb9\u756b\u8cea\u8207\u64ad\u653e\u5668\u5ba2\u6236\u7aef\u91cd\u8a66\u3002";

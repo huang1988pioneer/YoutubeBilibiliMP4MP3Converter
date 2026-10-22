@@ -8,3 +8,9 @@ release-staging/
 .DS_Store
 *.user
 *.suo
+
+# Local NuGet cache used when the global cache is unavailable.
+.nuget/
+
+# Local assistant workspace data (session logs, memory).
+.workbuddy-ai/
