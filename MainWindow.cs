@@ -5077,6 +5077,7 @@ public sealed partial class MainWindow : Window
         ResetBrowserCookieState();
         var needsAccount = VideoNeedsAccount(url);
         FlushLogToUi(force: true);
+        var startedUtc = DateTime.UtcNow;
         var logAtStart = _logText.Text?.Length ?? 0;
         var firstAttempt = await RunYtDlpAttemptAsync(
             ytDlpPath,
@@ -5217,7 +5218,193 @@ public sealed partial class MainWindow : Window
             return fallback.ExitCode;
         }
 
+        // Bilibili keeps the picture and the sound in separate streams. When the CDN blocks
+        // the audio pass with 567, yt-dlp leaves "<title>.f30080.mp4" behind: a finished
+        // looking file that plays without sound. Fetch the audio alone and mux it instead of
+        // making the user pull the whole video again.
+        if (firstAttempt.ExitCode != 0
+            && outputFormat == "MP4"
+            && YoutubeDownloadPolicy.IsBilibiliUrl(url)
+            && YoutubeDownloadPolicy.LooksLikeCdnThrottle(LogSince(logAtStart))
+            && await TryMuxPartialBilibiliDownloadAsync(
+                ytDlpPath, ffmpegPath, ffprobePath, url, outputPath, startedUtc, token, item))
+        {
+            return 0;
+        }
+
         return firstAttempt.ExitCode;
+    }
+
+    /// <summary>
+    /// Completes a download whose audio stream failed: reuses the video-only intermediate
+    /// file already on disk, pulls just the audio, and muxes the two with ffmpeg.
+    /// </summary>
+    private async Task<bool> TryMuxPartialBilibiliDownloadAsync(
+        string ytDlpPath,
+        string ffmpegPath,
+        string ffprobePath,
+        string url,
+        string outputPath,
+        DateTime startedUtc,
+        CancellationToken token,
+        DownloadItemView? item)
+    {
+        var videoOnly = FindVideoOnlyIntermediate(outputPath, startedUtc);
+        if (videoOnly is null)
+        {
+            return false;
+        }
+
+        AppendLog($"影像軌已下載完成（{IoPath.GetFileName(videoOnly)}），只補抓音軌後合併。");
+        item?.SetProgress(0, "只補抓音軌");
+
+        var tempDir = IoPath.Combine(IoPath.GetTempPath(), "yt-mux-" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            var startInfo = CreateYtDlpStartInfo(ytDlpPath, ffmpegPath, ffprobePath);
+            startInfo.ArgumentList.Add("-f");
+            startInfo.ArgumentList.Add("bestaudio[acodec^=mp4a]/bestaudio");
+            startInfo.ArgumentList.Add("--no-playlist");
+            startInfo.ArgumentList.Add("--retries");
+            startInfo.ArgumentList.Add("8");
+            startInfo.ArgumentList.Add("--fragment-retries");
+            startInfo.ArgumentList.Add("8");
+            startInfo.ArgumentList.Add("--concurrent-fragments");
+            startInfo.ArgumentList.Add("4");
+            startInfo.ArgumentList.Add("--retry-sleep");
+            startInfo.ArgumentList.Add("2");
+            startInfo.ArgumentList.Add("--encoding");
+            startInfo.ArgumentList.Add("utf-8");
+            startInfo.ArgumentList.Add("--newline");
+            AddBilibiliBrowserHeaders(startInfo, url);
+            var cookieSelection = AddCookieArguments(startInfo, url, allowAutomaticBrowserCookies: true);
+            if (cookieSelection is not null)
+            {
+                AppendLog($"Cookies: {cookieSelection.Label}");
+            }
+
+            startInfo.ArgumentList.Add("--paths");
+            startInfo.ArgumentList.Add(tempDir);
+            startInfo.ArgumentList.Add("--output");
+            startInfo.ArgumentList.Add("audio.%(ext)s");
+            startInfo.ArgumentList.Add(NormalizeMediaUrl(url));
+
+            if (await RunProcessAsync(startInfo, token, item) != 0)
+            {
+                AppendLog("音軌這次還是被擋住，先不合併；稍後再按一次下載即可。");
+                return false;
+            }
+
+            var audio = Directory.EnumerateFiles(tempDir).FirstOrDefault();
+            if (audio is null)
+            {
+                return false;
+            }
+
+            var target = IoPath.Combine(outputPath, MergedFileName(videoOnly));
+            var mux = new ProcessStartInfo
+            {
+                FileName = ffmpegPath,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            foreach (var argument in new[]
+                     {
+                         "-hide_banner", "-loglevel", "error", "-y",
+                         "-i", videoOnly,
+                         "-i", audio,
+                         "-c", "copy", "-movflags", "+faststart",
+                         target
+                     })
+            {
+                mux.ArgumentList.Add(argument);
+            }
+
+            if (await RunProcessAsync(mux, token, item) != 0 || !File.Exists(target))
+            {
+                AppendLog("音軌抓到了，但合併失敗。");
+                return false;
+            }
+
+            AppendLog($"已補上音軌並合併：{IoPath.GetFileName(target)}");
+            AppendLog($"原始影像檔 {IoPath.GetFileName(videoOnly)} 保留著，確認新檔可播放後可以刪掉。");
+            SetStatus("已補上音軌，下載完成");
+            return true;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"補音軌失敗：{ex.Message}");
+            return false;
+        }
+        finally
+        {
+            try
+            {
+                Directory.Delete(tempDir, recursive: true);
+            }
+            catch
+            {
+                // A leftover temp folder is harmless.
+            }
+        }
+    }
+
+    /// <summary>
+    /// yt-dlp names a single stream "<title>.f30080.mp4"; a merged file has no ".fNNNNN".
+    /// </summary>
+    private static string? FindVideoOnlyIntermediate(string outputPath, DateTime startedUtc)
+    {
+        try
+        {
+            if (!Directory.Exists(outputPath))
+            {
+                return null;
+            }
+
+            return Directory.EnumerateFiles(outputPath, "*.mp4")
+                .Where(path => File.GetLastWriteTimeUtc(path) >= startedUtc.AddMinutes(-1))
+                .Where(path => IsFormatSuffixed(IoPath.GetFileNameWithoutExtension(path)))
+                .OrderByDescending(File.GetLastWriteTimeUtc)
+                .FirstOrDefault();
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static bool IsFormatSuffixed(string nameWithoutExtension)
+    {
+        var dot = nameWithoutExtension.LastIndexOf(".f", StringComparison.Ordinal);
+        if (dot <= 0)
+        {
+            return false;
+        }
+
+        var id = nameWithoutExtension[(dot + 2)..];
+        return id.Length > 0 && id.All(char.IsDigit);
+    }
+
+    private static string MergedFileName(string videoOnlyPath)
+    {
+        var name = IoPath.GetFileNameWithoutExtension(videoOnlyPath);
+        var dot = name.LastIndexOf(".f", StringComparison.Ordinal);
+        var title = dot > 0 && IsFormatSuffixed(name) ? name[..dot] : name;
+        var candidate = title + ".mp4";
+        var index = 1;
+        while (File.Exists(IoPath.Combine(IoPath.GetDirectoryName(videoOnlyPath) ?? ".", candidate)))
+        {
+            candidate = $"{title} ({index++}).mp4";
+        }
+
+        return candidate;
     }
 
     private string LogSince(int mark)
