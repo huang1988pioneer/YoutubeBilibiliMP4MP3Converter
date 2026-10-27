@@ -2120,45 +2120,61 @@ public sealed partial class MainWindow : Window
 
     private async void ChooseFolderAsync(object? sender, RoutedEventArgs e)
     {
-        var folders = await StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions
+        try
         {
-            Title = "\u9078\u64c7\u8f38\u51fa\u8cc7\u6599\u593e",
-            AllowMultiple = false
-        });
+            var folders = await StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions
+            {
+                Title = "\u9078\u64c7\u8f38\u51fa\u8cc7\u6599\u593e",
+                AllowMultiple = false
+            });
 
-        var folder = folders.FirstOrDefault();
-        if (folder is not null && folder.TryGetLocalPath() is { } path)
+            var folder = folders.FirstOrDefault();
+            if (folder is not null && folder.TryGetLocalPath() is { } path)
+            {
+                _outputBox.Text = path;
+                SaveSettingsIfPossible();
+                SetStatus("\u8f38\u51fa\u8cc7\u6599\u593e\u5df2\u66f4\u65b0");
+                RefreshShellChrome();
+            }
+        }
+        catch (Exception ex)
         {
-            _outputBox.Text = path;
-            SaveSettingsIfPossible();
-            SetStatus("\u8f38\u51fa\u8cc7\u6599\u593e\u5df2\u66f4\u65b0");
-            RefreshShellChrome();
+            SetStatus("\u9078\u64c7\u8cc7\u6599\u593e\u5931\u6557");
+            AppendLog(ex.Message);
         }
     }
 
     private async void ChooseCookiesFileAsync(object? sender, RoutedEventArgs e)
     {
-        var files = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+        try
         {
-            Title = "\u9078\u64c7 cookies.txt \u6a94\u6848",
-            AllowMultiple = false,
-            FileTypeFilter =
-            [
-                new FilePickerFileType("Cookie Files") { Patterns = ["*.txt"] },
-                new FilePickerFileType("All Files") { Patterns = ["*"] }
-            ]
-        });
+            var files = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+            {
+                Title = "\u9078\u64c7 cookies.txt \u6a94\u6848",
+                AllowMultiple = false,
+                FileTypeFilter =
+                [
+                    new FilePickerFileType("Cookie Files") { Patterns = ["*.txt"] },
+                    new FilePickerFileType("All Files") { Patterns = ["*"] }
+                ]
+            });
 
-        var file = files.FirstOrDefault();
-        if (file is not null && file.TryGetLocalPath() is { } path)
+            var file = files.FirstOrDefault();
+            if (file is not null && file.TryGetLocalPath() is { } path)
+            {
+                _cookiesFilePath = path;
+                _cookiesPathLabel.Text = IoPath.GetFileName(path);
+                _cookiesPathLabel.Foreground = TextPrimary;
+                SaveSettingsIfPossible();
+                SetStatus($"\u5df2\u532f\u5165 Cookies: {IoPath.GetFileName(path)}");
+                AppendLog($"Cookies file: {path}");
+                RefreshShellChrome();
+            }
+        }
+        catch (Exception ex)
         {
-            _cookiesFilePath = path;
-            _cookiesPathLabel.Text = IoPath.GetFileName(path);
-            _cookiesPathLabel.Foreground = TextPrimary;
-            SaveSettingsIfPossible();
-            SetStatus($"\u5df2\u532f\u5165 Cookies: {IoPath.GetFileName(path)}");
-            AppendLog($"Cookies file: {path}");
-            RefreshShellChrome();
+            SetStatus("\u532f\u5165 Cookies \u5931\u6557");
+            AppendLog(ex.Message);
         }
     }
 
@@ -3378,6 +3394,7 @@ public sealed partial class MainWindow : Window
         StopEmbeddedPreview(clearStatus: false);
         HideParseError();
         _lastParseErrorDetail = null;
+        ResetBrowserCookieState();
         SetStatus("\u6b63\u5728\u89e3\u6790\u7db2\u5740...");
         AppendLog($"\u89e3\u6790: {urls[0]}");
 
@@ -3581,7 +3598,7 @@ public sealed partial class MainWindow : Window
                 return await DumpVideoInfoAsync(ytDlpPath, url, allowAutomaticBrowserCookies: false);
             }
 
-            _lastParseErrorDetail = ClassifyParseFailure(stderr, url, cookieSelection);
+            _lastParseErrorDetail = ClassifyParseFailure(stderr, url, cookieSelection, _automaticBrowserCookiesUnavailable);
             return null;
         }
 
@@ -3695,7 +3712,8 @@ public sealed partial class MainWindow : Window
     private static string ClassifyParseFailure(
         string stderr,
         string url,
-        CookieSelection? cookieSelection)
+        CookieSelection? cookieSelection,
+        bool automaticCookiesUnavailable = false)
     {
         var error = stderr ?? "";
         if (error.Contains("cookies database", StringComparison.OrdinalIgnoreCase)
@@ -3744,6 +3762,12 @@ public sealed partial class MainWindow : Window
             && (error.Contains("Unable to extract initial state", StringComparison.OrdinalIgnoreCase)
                 || error.Contains("risk-captcha", StringComparison.OrdinalIgnoreCase)))
         {
+            if (automaticCookiesUnavailable)
+            {
+                return "讀不到瀏覽器的登入 Cookies，改成匿名請求後 Bilibili 回傳的是風控驗證頁。"
+                    + "請確認瀏覽器仍登入 bilibili.com，或改用「Cookies 檔案」匯入該瀏覽器的 cookies.txt 後重試。";
+            }
+
             return "Bilibili 這次回傳的是風控驗證頁，不是影片頁（常見於海外 IP 或匿名請求）。"
                 + "請用瀏覽器開啟 bilibili.com 完成驗證，並保持該瀏覽器登入；"
                 + "或在「Cookies 檔案」匯入該瀏覽器的 cookies.txt 後重試。";
@@ -5050,6 +5074,7 @@ public sealed partial class MainWindow : Window
         DownloadItemView? item)
     {
         _lastRunForbidden = false;
+        ResetBrowserCookieState();
         var needsAccount = VideoNeedsAccount(url);
         FlushLogToUi(force: true);
         var logAtStart = _logText.Text?.Length ?? 0;
@@ -6163,6 +6188,18 @@ public sealed partial class MainWindow : Window
     {
         var browsers = FindBrowsersWithCookies();
         return _browserCookieIndex < browsers.Count ? browsers[_browserCookieIndex] : null;
+    }
+
+    /// <summary>
+    /// One unreadable cookie database used to disable browser cookies for the rest of the
+    /// session. Every later Bilibili parse then ran as an anonymous request, which Bilibili
+    /// answers with a risk-control page — the app looked permanently broken while the same
+    /// video played fine in the browser. Each new user action starts over instead.
+    /// </summary>
+    private void ResetBrowserCookieState()
+    {
+        _browserCookieIndex = 0;
+        _automaticBrowserCookiesUnavailable = false;
     }
 
     /// <summary>
