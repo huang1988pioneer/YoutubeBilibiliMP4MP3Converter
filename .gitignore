@@ -3,6 +3,7 @@ obj/
 dist/
 publish/
 release-staging/
+build-out/
 *.app/
 .local/
 .DS_Store
