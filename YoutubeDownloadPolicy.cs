@@ -20,15 +20,17 @@ internal static class YoutubeDownloadPolicy
     }
 
     /// <summary>
-    /// Bilibili throttles a single connection to a few hundred KiB/s.
-    /// Parallel DASH fragments use the built-in yt-dlp downloader, with no extra tool.
-    /// YouTube stays lower so extra connections do not trip HTTP 403.
+    /// Bilibili's CDN answers with a fake "567 Unknown Status" once it decides a client is
+    /// pulling too much, and a large video then dies partway through with "Giving up after
+    /// 8 retries". Sixteen parallel range requests get there much faster than four, so keep
+    /// the count modest; the download resumes from the .part file on the next attempt.
+    /// YouTube stays low so extra connections do not trip HTTP 403.
     /// </summary>
     public static int ConcurrentFragments(string? url)
     {
         if (IsBilibiliUrl(url))
         {
-            return 16;
+            return 4;
         }
 
         if (IsYouTubeUrl(url))
@@ -101,6 +103,18 @@ internal static class YoutubeDownloadPolicy
         !string.IsNullOrWhiteSpace(text)
         && (text.Contains("HTTP Error 403", StringComparison.OrdinalIgnoreCase)
             || text.Contains("403: Forbidden", StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// 567 is not a real HTTP status: Bilibili's CDN uses it to reject requests it does not
+    /// like, most often too many parallel range requests for the same file.
+    /// </summary>
+    public static bool LooksLikeCdnThrottle(string? text) =>
+        !string.IsNullOrWhiteSpace(text)
+        && text.Contains("HTTP Error 567", StringComparison.OrdinalIgnoreCase);
+
+    public static string CdnThrottleHint() =>
+        "Bilibili 的 CDN 暫時擋下了這支影片（HTTP 567，是它自己的限流代號）。"
+        + "先等 3–5 分鐘，再按一次下載就會從中斷的地方續傳；不要連按重試，那只會讓限流更久。";
 
     public static bool LooksLikeOutdatedYtDlp(string? text) =>
         !string.IsNullOrWhiteSpace(text)

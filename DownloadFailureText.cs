@@ -28,6 +28,13 @@ internal static class DownloadFailureText
             return YoutubeDownloadPolicy.ForbiddenGiveUpHint(isMac);
         }
 
+        // 567 has no meaning outside Bilibili, and the raw line ("Unknown Status") tells
+        // the user nothing actionable.
+        if (YoutubeDownloadPolicy.LooksLikeCdnThrottle(log))
+        {
+            return YoutubeDownloadPolicy.CdnThrottleHint();
+        }
+
         if (!string.IsNullOrWhiteSpace(useful))
         {
             return useful;

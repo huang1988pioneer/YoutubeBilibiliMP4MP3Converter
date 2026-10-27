@@ -25,6 +25,12 @@
   <ItemGroup>
     <Compile Remove="tests\**\*.cs" />
     <Compile Remove="tools\**\*.cs" />
+    <!-- Release staging holds .app bundles, and its Applications entry is a symlink to
+         /Applications; the default **/*.cs glob follows it and compiles every installed
+         app's sources. -->
+    <Compile Remove="release-staging\**\*.cs" />
+    <Compile Remove="dist\**\*.cs" />
+    <Compile Remove="build-out\**\*.cs" />
     <AvaloniaResource Include="Assets/app-icon.png" />
     <InternalsVisibleTo Include="RegressionTests" />
   </ItemGroup>

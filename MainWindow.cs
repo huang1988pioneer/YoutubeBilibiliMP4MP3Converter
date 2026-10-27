@@ -5264,6 +5264,13 @@ public sealed partial class MainWindow : Window
         startInfo.ArgumentList.Add("8");
         startInfo.ArgumentList.Add("--fragment-retries");
         startInfo.ArgumentList.Add("8");
+        if (YoutubeDownloadPolicy.IsBilibiliUrl(url))
+        {
+            // A 567 is the CDN throttling us, not a broken request: retrying instantly just
+            // extends the block. Give every retry a couple of seconds of breathing room.
+            startInfo.ArgumentList.Add("--retry-sleep");
+            startInfo.ArgumentList.Add("2");
+        }
         startInfo.ArgumentList.Add("--concurrent-fragments");
         startInfo.ArgumentList.Add(
             YoutubeDownloadPolicy.ConcurrentFragments(url).ToString(CultureInfo.InvariantCulture));
