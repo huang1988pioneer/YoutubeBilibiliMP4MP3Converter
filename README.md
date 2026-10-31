@@ -133,6 +133,8 @@ brew upgrade yt-dlp
 
 ## 注意事項
 
+播放清單、合集與頻道列表的實測結果及待實作範圍，見[解析可行性評估（2026-10-31）](docs/playlist-channel-feasibility-2026-10-31.md)。此文件為評估紀錄，尚未新增逐片勾選介面。
+
 YouTube 影片 / 播放清單、Bilibili 影片會由 `yt-dlp` 處理。Bilibili 會自動使用瀏覽器 headers，並在可用時讀取 Firefox / Chrome / Edge cookies。部分私人、地區限制、會員或需登入的影片仍可能失敗。
 
 範例 Bilibili 網址：
