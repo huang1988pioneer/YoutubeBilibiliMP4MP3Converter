@@ -101,7 +101,11 @@ try
     AssertFalse(YoutubeDownloadPolicy.LooksLikeHttpForbidden("download 100%"),
         "Successful progress is not a 403");
     AssertEqual("4", YoutubeDownloadPolicy.ConcurrentFragments("https://www.bilibili.com/video/BV1kQHs6cEpP").ToString(),
-        "Bilibili keeps the fragment count modest: its CDN answers heavy parallel pulls with HTTP 567");
+        "Bilibili keeps the fragment count modest so a real CDN throttle does not last longer");
+    AssertTrue(YoutubeDownloadPolicy.BilibiliMediaHeaders().Contains(YoutubeDownloadPolicy.BilibiliCdnRangeHeader),
+        "Bilibili media requests must send Range:bytes=0- or Tencent EdgeOne returns HTTP 567");
+    AssertFalse(YoutubeDownloadPolicy.BilibiliPageHeaders.Contains(YoutubeDownloadPolicy.BilibiliCdnRangeHeader),
+        "Search and webpage requests must not send the media Range header");
     AssertEqual("4", YoutubeDownloadPolicy.ConcurrentFragments("https://b23.tv/abc").ToString(),
         "Bilibili short links use the same fragment count");
     AssertEqual("4", YoutubeDownloadPolicy.ConcurrentFragments("https://www.youtube.com/watch?v=abc").ToString(),
@@ -225,6 +229,21 @@ try
             "yt-dlp 版本過舊（已超過 90 天），YouTube 容易出現 403。請在終端機執行：winget upgrade yt-dlp.yt-dlp\n"
             + "ERROR: unable to download video data: HTTP Error 403: Forbidden"),
         "The outdated hint itself is not the failure line");
+
+    var throttled = DownloadFailureText.Summarize(
+        "正在轉換 1/1...",
+        "[download] Got error: HTTP Error 567: Unknown Status. Giving up after 8 retries\n轉換失敗，結束碼 1",
+        isMac: true);
+    AssertTrue(throttled.Contains("HTTP 567", StringComparison.Ordinal),
+        "A Bilibili 567 is explained instead of the raw Unknown Status line");
+    AssertEqual("0", YoutubeDownloadPolicy.MeasuredCdnCooldownMinutes.ToString(),
+        "The probed EdgeOne cooldown is zero minutes");
+    AssertTrue(throttled.Contains("空等不會解開", StringComparison.Ordinal),
+        "The reminder must tell the user that waiting does not clear HTTP 567");
+    AssertFalse(throttled.Contains("3–5", StringComparison.Ordinal),
+        "The reminder must not ask for a 3–5 minute wait");
+    AssertFalse(throttled.Contains("正在轉換", StringComparison.Ordinal),
+        "A 567 failure does not repeat the progress status");
 
     var bare = DownloadFailureText.Summarize("正在轉換 1/1...", "轉換失敗，結束碼 1", isMac: true);
     AssertTrue(bare.Contains("結束碼 1", StringComparison.Ordinal),

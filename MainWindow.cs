@@ -3056,13 +3056,8 @@ public sealed partial class MainWindow : Window
         startInfo.ArgumentList.Add("--no-warnings");
         startInfo.ArgumentList.Add("--encoding");
         startInfo.ArgumentList.Add("utf-8");
-        // Reuse the same browser-like headers used for video pages.
-        startInfo.ArgumentList.Add("--add-headers");
-        startInfo.ArgumentList.Add("User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36");
-        startInfo.ArgumentList.Add("--add-headers");
-        startInfo.ArgumentList.Add("Referer:https://www.bilibili.com/");
-        startInfo.ArgumentList.Add("--add-headers");
-        startInfo.ArgumentList.Add("Accept-Language:zh-CN,zh-TW;q=0.9,zh;q=0.8,en;q=0.7");
+        // Page headers only. Range is for the media CDN and breaks some JSON APIs.
+        AddHeaderArguments(startInfo, YoutubeDownloadPolicy.BilibiliPageHeaders);
         startInfo.ArgumentList.Add(searchUrl);
 
         using var process = new Process { StartInfo = startInfo };
@@ -6278,12 +6273,16 @@ public sealed partial class MainWindow : Window
             return;
         }
 
-        startInfo.ArgumentList.Add("--add-headers");
-        startInfo.ArgumentList.Add("User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36");
-        startInfo.ArgumentList.Add("--add-headers");
-        startInfo.ArgumentList.Add("Referer:https://www.bilibili.com/");
-        startInfo.ArgumentList.Add("--add-headers");
-        startInfo.ArgumentList.Add("Accept-Language:zh-CN,zh-TW;q=0.9,zh;q=0.8,en;q=0.7");
+        AddHeaderArguments(startInfo, YoutubeDownloadPolicy.BilibiliMediaHeaders());
+    }
+
+    private static void AddHeaderArguments(ProcessStartInfo startInfo, IEnumerable<string> headers)
+    {
+        foreach (var header in headers)
+        {
+            startInfo.ArgumentList.Add("--add-headers");
+            startInfo.ArgumentList.Add(header);
+        }
     }
 
     private CookieSelection? AddCookieArguments(

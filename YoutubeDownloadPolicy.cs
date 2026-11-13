@@ -20,10 +20,38 @@ internal static class YoutubeDownloadPolicy
     }
 
     /// <summary>
-    /// Bilibili's CDN answers with a fake "567 Unknown Status" once it decides a client is
-    /// pulling too much, and a large video then dies partway through with "Giving up after
-    /// 8 retries". Sixteen parallel range requests get there much faster than four, so keep
-    /// the count modest; the download resumes from the .part file on the next attempt.
+    /// Browser headers for Bilibili search. Media downloads add
+    /// <see cref="BilibiliCdnRangeHeader"/>; search stays on this list because a Range
+    /// header can make a JSON API answer 206.
+    /// </summary>
+    public static readonly string[] BilibiliPageHeaders =
+    [
+        "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+        "Referer:https://www.bilibili.com/",
+        "Accept-Language:zh-CN,zh-TW;q=0.9,zh;q=0.8,en;q=0.7",
+    ];
+
+    /// <summary>
+    /// Tencent EdgeOne (<c>*.bilivideo.com</c>) answers HTTP 567 to a request that has no
+    /// Range header, before a single byte is sent. <c>bytes=0-</c> is the whole file.
+    /// yt-dlp still rewrites Range when it resumes a .part file.
+    /// </summary>
+    public const string BilibiliCdnRangeHeader = "Range:bytes=0-";
+
+    public static IEnumerable<string> BilibiliMediaHeaders()
+    {
+        foreach (var header in BilibiliPageHeaders)
+        {
+            yield return header;
+        }
+
+        yield return BilibiliCdnRangeHeader;
+    }
+
+    /// <summary>
+    /// Keep Bilibili's fragment count modest. A missing Range header is what makes
+    /// EdgeOne return 567 immediately; extra parallel pulls still make a real throttle
+    /// last longer. The download resumes from the .part file on the next attempt.
     /// YouTube stays low so extra connections do not trip HTTP 403.
     /// </summary>
     public static int ConcurrentFragments(string? url)
@@ -105,16 +133,24 @@ internal static class YoutubeDownloadPolicy
             || text.Contains("403: Forbidden", StringComparison.OrdinalIgnoreCase));
 
     /// <summary>
-    /// 567 is not a real HTTP status: Bilibili's CDN uses it to reject requests it does not
-    /// like, most often too many parallel range requests for the same file.
+    /// 567 is not a real HTTP status. Tencent EdgeOne uses it when a media request has no
+    /// Range header. Probed BV1LnW56bE9c on upos-sz-mirrorcosov.bilivideo.com: the same
+    /// header-less request was still 567 at 0, 1, 2 and 3 minutes, with no Retry-After.
+    /// A request that sent Range got 206 immediately afterwards, and 32 parallel ranged
+    /// requests never opened a cooldown. Waiting a few minutes does not clear it.
     /// </summary>
+    public const int MeasuredCdnCooldownMinutes = 0;
+
     public static bool LooksLikeCdnThrottle(string? text) =>
         !string.IsNullOrWhiteSpace(text)
         && text.Contains("HTTP Error 567", StringComparison.OrdinalIgnoreCase);
 
     public static string CdnThrottleHint() =>
-        "Bilibili 的 CDN 暫時擋下了這支影片（HTTP 567，是它自己的限流代號）。"
-        + "先等 3–5 分鐘，再按一次下載就會從中斷的地方續傳；不要連按重試，那只會讓限流更久。";
+        MeasuredCdnCooldownMinutes <= 0
+            ? "Bilibili 的 CDN 回了 HTTP 567。這不是要先等幾分鐘的限流，空等不會解開。"
+              + "請直接再按一次下載，已下載的部分會從中斷處續傳。"
+            : "Bilibili 的 CDN 暫時擋下了這支影片（HTTP 567）。"
+              + $"請先等 {MeasuredCdnCooldownMinutes} 分鐘，再按一次下載，會從中斷處續傳。";
 
     public static bool LooksLikeOutdatedYtDlp(string? text) =>
         !string.IsNullOrWhiteSpace(text)
