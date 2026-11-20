@@ -61,6 +61,28 @@ try
     AssertFalse(YoutubeDownloadPolicy.IsYouTubeUrl("https://www.bilibili.com/video/BV1xx411c7mD"),
         "Bilibili URLs are not YouTube");
 
+    string[] batchUrls = [
+        "https://www.youtube.com/watch?v=iCSJzOwJA18",
+        "https://www.youtube.com/watch?v=cevOKkYWqHU",
+        "https://www.youtube.com/watch?v=AIVNLHxs9fU",
+        .. Enumerable.Range(4, 6).Select(i => $"https://youtu.be/{i:D11}")
+    ];
+    foreach (var count in new[] { 1, 3, 6, 9 })
+    {
+        var expected = batchUrls.Take(count).ToArray();
+        foreach (var separator in new[] { " ", "\u00a0", "\r\n", "\t" })
+        {
+            var input = string.Join(separator, expected);
+            AssertTrue(expected.SequenceEqual(MainWindow.ExtractHttpUrls(input, false)),
+                $"Keep {count} links in input order");
+            var markdown = string.Join(separator, expected.Select(url => $"[{url}]({url})"));
+            AssertTrue(expected.SequenceEqual(MainWindow.ExtractHttpUrls(markdown + " " + expected[0], false)),
+                $"Keep all {count} Markdown targets once");
+        }
+    }
+    AssertTrue(MainWindow.ExtractHttpUrls("httpwhatever ftp://invalid", false).Length == 0,
+        "Reject non-HTTP input");
+
     var selector = YoutubeDownloadPolicy.GetMp4FormatSelector("1080P");
     AssertTrue(selector.Contains("vcodec^=avc1", StringComparison.Ordinal),
         "1080P selector must prefer H.264 to avoid AV1 403s");
