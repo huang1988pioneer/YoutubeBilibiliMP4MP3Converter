@@ -90,7 +90,8 @@ public sealed partial class MainWindow
     private int _probeGeneration;
     private bool _shellRendering;
     private bool _shellRecallSilent;
-    private bool _shellSawDownload;
+    private string? _shellBatchPosition;
+    private string? _shellBatchSummary;
     private bool _shellCancelRequested;
     private bool _shellProcessing;
     private bool _shellSearching;
@@ -354,7 +355,7 @@ public sealed partial class MainWindow
         page.Children.Add(Gap(10));
         page.Children.Add(new TextBlock
         {
-            Text = "留下這支影片",
+            Text = "貼上影片連結",
             Foreground = palette.Primary,
             FontSize = 34,
             FontWeight = FontWeight.SemiBold
@@ -362,7 +363,7 @@ public sealed partial class MainWindow
         page.Children.Add(Gap(8));
         page.Children.Add(new TextBlock
         {
-            Text = "貼上 YouTube 或 Bilibili 的網址。下一步會列出這支影片實際有的畫質，也可以只留聲音。",
+            Text = "多個網址可用空格或換行分隔，也可分次按「貼上」追加。選一次格式，即可依序轉檔。",
             Foreground = palette.Gray,
             FontSize = 15,
             TextWrapping = TextWrapping.Wrap,
@@ -375,7 +376,10 @@ public sealed partial class MainWindow
         var box = new TextBox
         {
             Text = _shellDraft,
-            PlaceholderText = "貼上影片網址",
+            PlaceholderText = "貼上影片網址，Shift + Enter 換行",
+            AcceptsReturn = true,
+            TextWrapping = TextWrapping.Wrap,
+            MaxHeight = 150,
             Background = Brushes.Transparent,
             BorderThickness = new Thickness(0),
             Foreground = palette.Primary,
@@ -383,22 +387,20 @@ public sealed partial class MainWindow
             SelectionBrush = palette.Selection,
             FontSize = 15,
             Padding = new Thickness(0, 2),
-            MinHeight = 28,
+            MinHeight = 58,
             VerticalAlignment = VerticalAlignment.Center,
             HorizontalAlignment = HorizontalAlignment.Stretch
         };
-        box.KeyDown += (_, e) =>
+        var submit = PrimaryButton(palette, "查看格式", () => _ = SubmitShellUrlAsync());
+        void UpdateCount()
         {
-            if (e.Key != Key.Enter)
-            {
-                return;
-            }
-
-            e.Handled = true;
-            _ = SubmitShellUrlAsync();
-        };
+            var count = ExtractHttpUrls(box.Text, _downloadPlaylist).Length;
+            submit.Content = count > 0 ? $"查看格式（{count} 個連結）" : "查看格式";
+        }
+        UpdateCount();
         box.TextChanged += (_, _) =>
         {
+            UpdateCount();
             if (_shellRecallSilent)
             {
                 return;
@@ -410,7 +412,7 @@ public sealed partial class MainWindow
         _shellUrlBox = box;
         page.Children.Add(UrlField(palette, box));
         page.Children.Add(Gap(14));
-        page.Children.Add(PrimaryButton(palette, "查看格式", () => _ = SubmitShellUrlAsync()));
+        page.Children.Add(submit);
 
         _shellHintText = new TextBlock
         {
@@ -676,9 +678,9 @@ public sealed partial class MainWindow
 
     private void BuildDownloading(StackPanel page, ShellPalette palette)
     {
-        var title = string.IsNullOrWhiteSpace(_parsedInfo?.Title) ? "正在儲存" : _parsedInfo!.Title;
+        var title = _activeDownload?.Title ?? _parsedInfo?.Title ?? "正在儲存";
         var body = new StackPanel { Spacing = 8 };
-        body.Children.Add(Eyebrow("下載中", palette));
+        body.Children.Add(Eyebrow(_shellBatchPosition ?? "下載中", palette));
         body.Children.Add(new TextBlock
         {
             Text = title,
@@ -758,7 +760,7 @@ public sealed partial class MainWindow
         });
         body.Children.Add(new TextBlock
         {
-            Text = "檔案已經存好",
+            Text = _shellBatchSummary ?? "檔案已經存好",
             Foreground = palette.Primary,
             FontSize = 24,
             FontWeight = FontWeight.SemiBold
@@ -780,7 +782,7 @@ public sealed partial class MainWindow
         body.Children.Add(pathText);
 
         var summary = _statusText.Text?.Trim();
-        if (!string.IsNullOrEmpty(summary))
+        if (_shellBatchSummary is null && !string.IsNullOrEmpty(summary))
         {
             body.Children.Add(new TextBlock
             {
@@ -797,7 +799,7 @@ public sealed partial class MainWindow
             Spacing = 10,
             Margin = new Thickness(0, 10, 0, 0)
         };
-        actions.Children.Add(PrimaryButton(palette, "開啟檔案", OpenFinishedFile));
+        actions.Children.Add(PrimaryButton(palette, _shellBatchSummary is null ? "開啟檔案" : "開啟輸出資料夾", OpenFinishedFile));
         actions.Children.Add(GhostButton(palette, "再轉一支", () => ShowInput(clear: true)));
         body.Children.Add(actions);
         page.Children.Add(SurfaceCard(palette, body));
@@ -1096,6 +1098,13 @@ public sealed partial class MainWindow
 
         switch (_shellPhase)
         {
+            case ShellPhase.Input when e.Key == Key.Enter && _shellUrlBox?.IsFocused == true:
+                if (e.KeyModifiers == KeyModifiers.Shift)
+                    _shellUrlBox.SelectedText = Environment.NewLine;
+                else
+                    _ = SubmitShellUrlAsync();
+                e.Handled = true;
+                break;
             case ShellPhase.Input when e.Key == Key.Tab
                 && !string.IsNullOrEmpty(_shellClipboardUrl)
                 && string.IsNullOrWhiteSpace(_shellUrlBox?.Text):
@@ -1202,8 +1211,8 @@ public sealed partial class MainWindow
             _shellDraft = _shellUrlBox.Text ?? "";
         }
 
-        var urls = ExtractHttpUrls(_shellDraft);
-        if (urls.Count == 0)
+        var urls = ExtractHttpUrls(_shellDraft, _downloadPlaylist);
+        if (urls.Length == 0)
         {
             _shellWarning = "這看起來不是連結 — 請貼上完整網址";
             _shellPhase = ShellPhase.Input;
@@ -1246,7 +1255,7 @@ public sealed partial class MainWindow
         }
         else
         {
-            RememberShellUrl(urls[0]);
+            RememberShellUrl(string.Join(Environment.NewLine, urls));
             if (_formatChoices.Count == 0)
             {
                 _formatChoices = FormatChoiceBuilder.Fallback();
@@ -1278,7 +1287,8 @@ public sealed partial class MainWindow
         _shellSpeed = "";
         _shellProcessing = false;
         _shellCancelRequested = false;
-        _shellSawDownload = false;
+        _shellBatchPosition = null;
+        _shellBatchSummary = null;
         if (choice.Kind == "audio")
         {
             SetOutputFormat("MP3");
@@ -1291,7 +1301,7 @@ public sealed partial class MainWindow
 
         _shellPhase = ShellPhase.Downloading;
         RenderShell();
-        await ConvertOrCancelCoreAsync();
+        var items = await ConvertOrCancelCoreAsync();
         if (_shellPhase != ShellPhase.Downloading)
         {
             return;
@@ -1304,7 +1314,7 @@ public sealed partial class MainWindow
             return;
         }
 
-        if (!_shellSawDownload)
+        if (items.Count == 0)
         {
             _shellError = FirstNonEmpty(_statusText.Text, "無法開始下載。");
             _shellPhase = ShellPhase.Error;
@@ -1312,13 +1322,13 @@ public sealed partial class MainWindow
             return;
         }
 
-        var urls = GetInputUrls();
-        var item = urls.Length == 0
-            ? _downloadItems.LastOrDefault()
-            : _downloadItems.LastOrDefault(entry => UrlsLikelySameVideo(entry.Url, urls[0]));
-        if (item?.State == DownloadState.Completed)
+        var item = items[0];
+        var completed = items.Count(entry => entry.State == DownloadState.Completed);
+        if (items.Count > 1)
+            _shellBatchSummary = $"已完成 {completed} / {items.Count} 個連結";
+        if (completed > 0)
         {
-            _shellDonePath = string.IsNullOrWhiteSpace(item.OutputPath) ? _outputBox.Text : item.OutputPath;
+            _shellDonePath = items.Count > 1 || string.IsNullOrWhiteSpace(item.OutputPath) ? _outputBox.Text : item.OutputPath;
             _shellPhase = ShellPhase.Done;
         }
         else if (item?.State == DownloadState.Cancelled)
@@ -1384,20 +1394,7 @@ public sealed partial class MainWindow
             return;
         }
 
-        string? url = null;
-        try
-        {
-            var clipboard = TopLevel.GetTopLevel(this)?.Clipboard;
-            if (clipboard is not null)
-            {
-                var text = await clipboard.TryGetTextAsync();
-                url = string.IsNullOrWhiteSpace(text) ? null : ExtractHttpUrls(text).FirstOrDefault();
-            }
-        }
-        catch
-        {
-            url = null;
-        }
+        var url = await ReadClipboardUrlsAsync();
 
         if (_shellPhase != ShellPhase.Input || _shellHintText is null || !string.IsNullOrEmpty(_shellWarning))
         {
@@ -1452,7 +1449,11 @@ public sealed partial class MainWindow
         }
 
         _shellRecallSilent = true;
-        _shellUrlBox.Text = _shellClipboardUrl;
+        var draft = _shellUrlBox.Text?.TrimEnd();
+        _shellUrlBox.Text = string.IsNullOrEmpty(draft) ? _shellClipboardUrl : draft + Environment.NewLine + _shellClipboardUrl;
+        _shellWarning = null;
+        _shellRecallIndex = -1;
+        _shellUrlBox.Focus();
         _shellUrlBox.CaretIndex = _shellUrlBox.Text?.Length ?? 0;
         _shellRecallSilent = false;
         _shellDraft = _shellUrlBox.Text ?? "";
@@ -1583,13 +1584,6 @@ public sealed partial class MainWindow
 
     private bool HasCompletedDownloads() =>
         _downloadItems.Any(item => item.State == DownloadState.Completed);
-
-    private List<string> ExtractHttpUrls(string text) =>
-        text.Split(['\r', '\n', ' ', '\t'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Select(url => NormalizeMediaUrl(url, preservePlaylistParams: _downloadPlaylist))
-            .Where(url => url.StartsWith("http", StringComparison.OrdinalIgnoreCase))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
 
     private string BuildVideoMeta(ParsedVideoInfo? info)
     {
@@ -2106,22 +2100,28 @@ public sealed partial class MainWindow
         };
     }
 
-    private async Task PasteClipboardIntoUrlAsync()
+    private async Task<string?> ReadClipboardUrlsAsync()
     {
-        string? url = null;
         try
         {
             var clipboard = TopLevel.GetTopLevel(this)?.Clipboard;
-            if (clipboard is not null)
-            {
-                var text = await clipboard.TryGetTextAsync();
-                url = string.IsNullOrWhiteSpace(text) ? null : ExtractHttpUrls(text).FirstOrDefault();
-            }
+            if (clipboard is null)
+                return null;
+            var urls = ExtractHttpUrls(await clipboard.TryGetTextAsync(), _downloadPlaylist);
+            return urls.Length == 0 ? null : string.Join(Environment.NewLine, urls);
         }
         catch
         {
-            url = null;
+            return null;
         }
+    }
+
+    private async Task PasteClipboardIntoUrlAsync()
+    {
+        var box = _shellUrlBox;
+        var url = await ReadClipboardUrlsAsync();
+        if (box is null || box != _shellUrlBox)
+            return;
 
         if (string.IsNullOrEmpty(url))
         {

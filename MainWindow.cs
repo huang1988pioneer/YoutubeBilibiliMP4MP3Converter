@@ -188,6 +188,7 @@ public sealed partial class MainWindow : Window
         FontFamily = new FontFamily(PlatformCopy.UiFontFamily);
 
         _urlBox = CreateInputBox("https://www.youtube.com/watch?v=... \u6216 Bilibili \u5f71\u7247\u7db2\u5740");
+        _urlBox.AcceptsReturn = true;
         _outputBox = CreateInputBox("\u9078\u64c7\u8f38\u51fa\u8cc7\u6599\u593e");
         _outputBox.Text = settings.LastOutputFolder;
         _outputBox.LostFocus += (_, _) => SaveSettingsIfPossible();
@@ -4786,15 +4787,30 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    private string[] GetInputUrls()
+    private string[] GetInputUrls() => ExtractHttpUrls(_urlBox.Text, _downloadPlaylist);
+
+    internal static string[] ExtractHttpUrls(string? text, bool preservePlaylistParams)
     {
-        var text = _urlBox.Text ?? "";
-        return text
-            .Split(['\r', '\n', ' ', '\t'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Select(u => NormalizeMediaUrl(u, preservePlaylistParams: _downloadPlaylist))
-            .Where(u => u.StartsWith("http", StringComparison.OrdinalIgnoreCase))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToArray();
+        if (string.IsNullOrWhiteSpace(text))
+            return [];
+
+        // Chat apps may copy hyperlinks as Markdown instead of plain URLs.
+        var plainText = Regex.Replace(text, @"\[[^\[\]\r\n]*\]\((https?://[^\s)]+)\)", " $1 ",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        var result = new List<string>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var token in plainText.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))
+        {
+            var url = token.Trim('<', '>');
+            if (!Uri.TryCreate(url, UriKind.Absolute, out var uri)
+                || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps) || uri.Host.Length == 0)
+                continue;
+
+            var normalized = NormalizeMediaUrl(url, preservePlaylistParams);
+            if (seen.Add(normalized))
+                result.Add(normalized);
+        }
+        return result.ToArray();
     }
 
     private async void ConvertOrCancelAsync(object? sender, RoutedEventArgs e)
@@ -4808,31 +4824,31 @@ public sealed partial class MainWindow : Window
         await ConvertOrCancelCoreAsync();
     }
 
-    private async Task ConvertOrCancelCoreAsync()
+    private async Task<List<DownloadItemView>> ConvertOrCancelCoreAsync()
     {
         if (_shellCancelRequested)
         {
-            return;
+            return [];
         }
 
         if (_conversionTokenSource is not null)
         {
             SetStatus("\u5df2\u6709\u8f49\u63db\u4efb\u52d9\u9032\u884c\u4e2d");
-            return;
+            return [];
         }
 
         var urls = GetInputUrls();
         if (urls.Length == 0)
         {
             SetStatus("\u8acb\u81f3\u5c11\u8f38\u5165\u4e00\u500b YouTube \u6216 Bilibili \u7db2\u5740");
-            return;
+            return [];
         }
 
         var outputPath = _outputBox.Text?.Trim();
         if (string.IsNullOrWhiteSpace(outputPath) || !Directory.Exists(outputPath))
         {
             SetStatus("\u8acb\u9078\u64c7\u6709\u6548\u7684\u8f38\u51fa\u8cc7\u6599\u593e");
-            return;
+            return [];
         }
 
         SaveSettingsIfPossible();
@@ -4847,9 +4863,10 @@ public sealed partial class MainWindow : Window
             AppendLog($"yt-dlp: {ytDlpPath ?? "\u627e\u4e0d\u5230"}");
             AppendLog($"ffmpeg: {ffmpegPath ?? "\u627e\u4e0d\u5230"}");
             AppendLog($"ffprobe: {ffprobePath ?? "\u627e\u4e0d\u5230"}");
-            return;
+            return [];
         }
 
+        var pending = new List<DownloadItemView>();
         foreach (var url in urls)
         {
             var title = _parsedInfo is not null
@@ -4864,7 +4881,8 @@ public sealed partial class MainWindow : Window
             }
 
             var existing = _downloadItems.FirstOrDefault(i =>
-                UrlsLikelySameVideo(i.Url, url)
+                string.Equals(i.Url, url, StringComparison.Ordinal)
+                && (_outputFormat != "MP4" || i.Quality == _mp4Quality)
                 && string.Equals(i.Format, _outputFormat, StringComparison.OrdinalIgnoreCase));
             if (existing is not null)
             {
@@ -4875,6 +4893,7 @@ public sealed partial class MainWindow : Window
                 }
 
                 existing.ResetForRetry();
+                pending.Add(existing);
                 continue;
             }
 
@@ -4903,6 +4922,7 @@ public sealed partial class MainWindow : Window
             item.OnOpen = () => OpenMediaFile(item.OutputPath, item.Format);
             item.OnStateChanged = RefreshQueueSections;
             _downloadItems.Add(item);
+            pending.Add(item);
         }
 
         RebuildDownloadList();
@@ -4926,9 +4946,9 @@ public sealed partial class MainWindow : Window
         try
         {
             var successCount = 0;
-            var pending = _downloadItems.Where(i => i.State == DownloadState.Queued).ToList();
             for (var index = 0; index < pending.Count; index++)
             {
+                _conversionTokenSource.Token.ThrowIfCancellationRequested();
                 var item = pending[index];
                 if (item.State == DownloadState.Cancelled)
                 {
@@ -4936,6 +4956,14 @@ public sealed partial class MainWindow : Window
                 }
 
                 _activeDownload = item;
+                if (_shellPhase == ShellPhase.Downloading && pending.Count > 1)
+                {
+                    _shellPercent = 0;
+                    _shellSpeed = "";
+                    _shellProcessing = false;
+                    _shellBatchPosition = $"第 {index + 1} / {pending.Count} 個連結";
+                    RenderShell();
+                }
                 _lastMediaOutputPath = null;
                 item.SetState(DownloadState.Running);
                 SetStatus($"\u6b63\u5728\u8f49\u63db {index + 1}/{pending.Count}...");
@@ -5047,6 +5075,8 @@ public sealed partial class MainWindow : Window
         }
         finally
         {
+            foreach (var item in pending.Where(item => item.State is DownloadState.Running or DownloadState.Queued))
+                item.SetState(_conversionTokenSource.IsCancellationRequested ? DownloadState.Cancelled : DownloadState.Failed);
             FlushLogToUi(force: true);
             _activeDownload = null;
             _conversionTokenSource?.Dispose();
@@ -5054,6 +5084,7 @@ public sealed partial class MainWindow : Window
             SetBusy(false);
             RebuildDownloadList();
         }
+        return pending;
     }
 
     private async Task<int> RunYtDlpAsync(
@@ -6960,11 +6991,6 @@ public sealed partial class MainWindow : Window
 
     private void SetBusy(bool busy)
     {
-        if (busy)
-        {
-            _shellSawDownload = true;
-        }
-
         _parseButton.IsEnabled = !busy;
         _pasteButton.IsEnabled = !busy;
         _browseButton.IsEnabled = !busy;
