@@ -158,10 +158,8 @@ package_macos() {
   tar -czf "$DIST/$tar_name" -C "$STAGE/pack/$rid" "${NAME}.app" README.txt
   echo "created $DIST/$tar_name"
   local zip_name="${NAME}-v${VERSION}-${rid}.zip"
-  (
-    cd "$STAGE/pack/$rid"
-    zip -qry "$DIST/$zip_name" "${NAME}.app" README.txt
-  )
+  # The signature of each managed assembly is stored in macOS extended attributes.
+  ditto -c -k --sequesterRsrc "$STAGE/pack/$rid" "$DIST/$zip_name"
   echo "created $DIST/$zip_name"
 }
 

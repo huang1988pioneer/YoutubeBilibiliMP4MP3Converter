@@ -58,9 +58,21 @@ internal static class Program
 
     private static AppBuilder BuildAvaloniaApp()
     {
-        return AppBuilder.Configure<App>()
+        var builder = AppBuilder.Configure<App>()
             .UsePlatformDetect()
             .WithInterFont()
             .LogToTrace();
+
+        if (OperatingSystem.IsMacOSVersionAtLeast(27))
+        {
+            // Metal shader compilation was active during repeated startup aborts on macOS 27.
+            // Avalonia's fallback can only help if the graphics backend fails during setup.
+            builder.With(new AvaloniaNativePlatformOptions
+            {
+                RenderingMode = [AvaloniaNativeRenderingMode.Software]
+            });
+        }
+
+        return builder;
     }
 }
