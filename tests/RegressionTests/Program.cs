@@ -1,4 +1,17 @@
+using System.Diagnostics;
 using YoutubeOrBilibiliMP3Converter;
+
+if (args is ["--noisy-probe"])
+{
+    Console.Error.Write(new string('w', 1024 * 1024));
+    Console.Write("metadata");
+    return 0;
+}
+if (args is ["--stalled-probe"])
+{
+    await Task.Delay(Timeout.Infinite);
+    return 1;
+}
 
 var root = Path.Combine(Path.GetTempPath(), $"converter-cookie-regression-{Guid.NewGuid():N}");
 var local = Path.Combine(root, "Local");
@@ -6,6 +19,33 @@ var roaming = Path.Combine(root, "Roaming");
 
 try
 {
+    var probe = new ProcessStartInfo("dotnet")
+    {
+        RedirectStandardOutput = true,
+        RedirectStandardError = true,
+        UseShellExecute = false,
+        CreateNoWindow = true
+    };
+    probe.ArgumentList.Add(typeof(Program).Assembly.Location);
+    probe.ArgumentList.Add("--noisy-probe");
+    using (var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10)))
+    {
+        var result = await MainWindow.ReadParseOutputAsync(probe, deadline.Token);
+        AssertTrue(result.ExitCode == 0 && result.Output == "metadata" && result.Error.Length == 1024 * 1024,
+            "A full stderr pipe must not block metadata on stdout");
+    }
+    probe.ArgumentList[1] = "--stalled-probe";
+    using (var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(1)))
+    {
+        try
+        {
+            await MainWindow.ReadParseOutputAsync(probe, deadline.Token).WaitAsync(TimeSpan.FromSeconds(10));
+            throw new InvalidOperationException("Cancellation must stop a stalled metadata probe");
+        }
+        catch (OperationCanceledException) when (deadline.IsCancellationRequested) { }
+    }
+    Console.WriteLine("PASS: noisy and stalled metadata probes");
+
     // Regression: an installed/empty Chrome directory is not a usable cookie source.
     Directory.CreateDirectory(Path.Combine(local, "Google", "Chrome", "User Data"));
     AssertEqual(null, BrowserCookieLocator.FindWindowsBrowser(local, roaming),

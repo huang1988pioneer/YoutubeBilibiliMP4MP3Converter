@@ -1500,6 +1500,7 @@ public sealed partial class MainWindow
         if (_shellPhase == ShellPhase.Probing)
         {
             _probeGeneration++;
+            CancelUrlParse();
             ShowInput(clear: false);
             return;
         }

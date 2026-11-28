@@ -73,6 +73,7 @@ public sealed partial class MainWindow : Window
     private readonly ComboBox _qualityCombo;
     private readonly ComboBox _searchPlatformCombo;
     private readonly ComboBox _searchCountCombo;
+    private CancellationTokenSource? _parseCancellation;
     private readonly Button _parseButton;
     private readonly Button _convertButton;
     private readonly Button _pasteButton;
@@ -611,6 +612,7 @@ public sealed partial class MainWindow : Window
                 RefreshToolSetup();
             }
         };
+        Closed += (_, _) => CancelUrlParse();
         Closing += (_, _) => StopEmbeddedPreview(clearStatus: false);
     }
 
@@ -3363,8 +3365,21 @@ public sealed partial class MainWindow : Window
         return cleaned;
     }
 
+    private void CancelUrlParse()
+    {
+        var cancellation = _parseCancellation;
+        _parseCancellation = null;
+        if (cancellation is not null)
+        {
+            cancellation.Cancel();
+            _parseButton.IsEnabled = true;
+        }
+    }
+
     private async Task ParseUrlCoreAsync()
     {
+        CancelUrlParse();
+        _parsedInfo = null;
         var urls = GetInputUrls();
         if (urls.Length == 0)
         {
@@ -3382,6 +3397,9 @@ public sealed partial class MainWindow : Window
             return;
         }
 
+        using var cancellation = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+        _parseCancellation = cancellation;
+        var token = cancellation.Token;
         _parseButton.IsEnabled = false;
         _previewPlayButton.IsEnabled = false;
         _previewStopButton.IsEnabled = false;
@@ -3396,8 +3414,9 @@ public sealed partial class MainWindow : Window
         try
         {
             var info = IsYouTubeChannelUrl(urls[0])
-                ? await DumpChannelInfoAsync(ytDlpPath, urls[0])
-                : await DumpVideoInfoAsync(ytDlpPath, urls[0]);
+                ? await DumpChannelInfoAsync(ytDlpPath, urls[0], token)
+                : await DumpVideoInfoAsync(ytDlpPath, urls[0], token);
+            token.ThrowIfCancellationRequested();
             if (info is null)
             {
                 var detail = _lastParseErrorDetail
@@ -3481,6 +3500,15 @@ public sealed partial class MainWindow : Window
                 _previewStatus.Foreground = Green;
             }
         }
+        catch (OperationCanceledException) when (token.IsCancellationRequested)
+        {
+            if (_parseCancellation == cancellation)
+            {
+                _parsedInfo = null;
+                ShowParseError("解析超過 60 秒。請確認網路連線後重試。");
+                SetStatus("解析網址逾時");
+            }
+        }
         catch (Exception ex)
         {
             var detail = "\u7a0b\u5f0f\u5728\u89e3\u6790\u6642\u767c\u751f\u672a\u9810\u671f\u932f\u8aa4\u3002\u8acb\u91cd\u8a66\uff1b\u82e5\u6301\u7e8c\u767c\u751f\uff0c\u8acb\u67e5\u770b\u300c\u904b\u884c\u8a18\u9304\u300d\u7684\u8a73\u7d30\u8cc7\u8a0a\u3002";
@@ -3490,20 +3518,41 @@ public sealed partial class MainWindow : Window
         }
         finally
         {
-            try
+            if (_parseCancellation == cancellation)
             {
+                _parseCancellation = null;
                 _parseButton.IsEnabled = true;
             }
-            catch
-            {
-                // ignore if control was torn down mid-operation
-            }
         }
+    }
+
+    internal static async Task<(int ExitCode, string Output, string Error)> ReadParseOutputAsync(
+        ProcessStartInfo startInfo, CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        using var process = Process.Start(startInfo) ?? throw new InvalidOperationException("無法啟動解析工具。");
+        using var registration = token.Register(() =>
+        {
+            try
+            {
+                process.Kill(entireProcessTree: true);
+            }
+            catch (InvalidOperationException)
+            {
+                // The process already exited.
+            }
+        });
+        var output = process.StandardOutput.ReadToEndAsync(token);
+        var error = process.StandardError.ReadToEndAsync(token);
+        await Task.WhenAll(output, error, process.WaitForExitAsync(token)).ConfigureAwait(false);
+        token.ThrowIfCancellationRequested();
+        return (process.ExitCode, await output, await error);
     }
 
     private async Task<ParsedVideoInfo?> DumpVideoInfoAsync(
         string ytDlpPath,
         string url,
+        CancellationToken token,
         bool allowAutomaticBrowserCookies = true,
         bool allowAutomaticForAnySite = false,
         bool recordCookieFailure = true)
@@ -3537,17 +3586,10 @@ public sealed partial class MainWindow : Window
 
         startInfo.ArgumentList.Add(NormalizeMediaUrl(url));
 
-        using var process = new Process { StartInfo = startInfo };
-        if (!process.Start())
-        {
-            return null;
-        }
+        var (exitCode, stdout, stderr) = await ReadParseOutputAsync(startInfo, token);
+        token.ThrowIfCancellationRequested();
 
-        var stdout = await process.StandardOutput.ReadToEndAsync();
-        var stderr = await process.StandardError.ReadToEndAsync();
-        await process.WaitForExitAsync();
-
-        if (process.ExitCode != 0)
+        if (exitCode != 0)
         {
             if (!string.IsNullOrWhiteSpace(stderr))
             {
@@ -3563,6 +3605,7 @@ public sealed partial class MainWindow : Window
                 var unlocked = await DumpVideoInfoAsync(
                     ytDlpPath,
                     url,
+                    token,
                     allowAutomaticBrowserCookies: true,
                     allowAutomaticForAnySite: true,
                     recordCookieFailure: false);
@@ -3583,6 +3626,7 @@ public sealed partial class MainWindow : Window
                     return await DumpVideoInfoAsync(
                         ytDlpPath,
                         url,
+                        token,
                         allowAutomaticBrowserCookies: true,
                         allowAutomaticForAnySite: allowAutomaticForAnySite,
                         recordCookieFailure: true);
@@ -3590,7 +3634,7 @@ public sealed partial class MainWindow : Window
 
                 _automaticBrowserCookiesUnavailable = true;
                 AppendLog("\u81ea\u52d5\u8b80\u53d6\u700f\u89bd\u5668 Cookies \u5931\u6557\uff0c\u6539\u7528\u4e0d\u767b\u5165\u6a21\u5f0f\u91cd\u8a66\u3002");
-                return await DumpVideoInfoAsync(ytDlpPath, url, allowAutomaticBrowserCookies: false);
+                return await DumpVideoInfoAsync(ytDlpPath, url, token, allowAutomaticBrowserCookies: false);
             }
 
             _lastParseErrorDetail = ClassifyParseFailure(stderr, url, cookieSelection, _automaticBrowserCookiesUnavailable);
@@ -3657,6 +3701,7 @@ public sealed partial class MainWindow : Window
                 var unlocked = await DumpVideoInfoAsync(
                     ytDlpPath,
                     url,
+                    token,
                     allowAutomaticBrowserCookies: true,
                     allowAutomaticForAnySite: true,
                     recordCookieFailure: false);
@@ -3684,7 +3729,7 @@ public sealed partial class MainWindow : Window
                 AccessWarning: accessWarning,
                 Access: accessKind);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             AppendLog($"JSON \u89e3\u6790\u5931\u6557: {ex.Message}");
             _lastParseErrorDetail = "\u5df2\u6536\u5230\u5f71\u7247\u8cc7\u6599\uff0c\u4f46\u683c\u5f0f\u7121\u6cd5\u8b80\u53d6\u3002\u8acb\u66f4\u65b0 yt-dlp \u5f8c\u91cd\u8a66\u3002";
@@ -3855,16 +3900,16 @@ public sealed partial class MainWindow : Window
         return (durationMismatch, warning, access);
     }
 
-    private async Task<ParsedVideoInfo?> DumpChannelInfoAsync(string ytDlpPath, string channelUrl)
+    private async Task<ParsedVideoInfo?> DumpChannelInfoAsync(string ytDlpPath, string channelUrl, CancellationToken token)
     {
-        var sampleVideoUrl = await FindChannelSampleVideoUrlAsync(ytDlpPath, channelUrl);
+        var sampleVideoUrl = await FindChannelSampleVideoUrlAsync(ytDlpPath, channelUrl, token);
         if (string.IsNullOrWhiteSpace(sampleVideoUrl))
         {
             AppendLog("\u7121\u6cd5\u5f9e\u983b\u9053\u53d6\u5f97\u516c\u958b\u5f71\u7247\uff0c\u7121\u6cd5\u8b80\u53d6\u8a02\u95b1\u6578\u3002");
             return null;
         }
 
-        var sampleInfo = await DumpVideoInfoAsync(ytDlpPath, sampleVideoUrl);
+        var sampleInfo = await DumpVideoInfoAsync(ytDlpPath, sampleVideoUrl, token);
         if (sampleInfo is null)
         {
             return null;
@@ -3883,7 +3928,7 @@ public sealed partial class MainWindow : Window
         };
     }
 
-    private async Task<string?> FindChannelSampleVideoUrlAsync(string ytDlpPath, string channelUrl)
+    private async Task<string?> FindChannelSampleVideoUrlAsync(string ytDlpPath, string channelUrl, CancellationToken token)
     {
         var startInfo = new ProcessStartInfo
         {
@@ -3904,16 +3949,9 @@ public sealed partial class MainWindow : Window
         startInfo.ArgumentList.Add("%(webpage_url)s");
         startInfo.ArgumentList.Add(channelUrl);
 
-        using var process = new Process { StartInfo = startInfo };
-        if (!process.Start())
-        {
-            return null;
-        }
-
-        var stdout = await process.StandardOutput.ReadToEndAsync();
-        var stderr = await process.StandardError.ReadToEndAsync();
-        await process.WaitForExitAsync();
-        if (process.ExitCode != 0)
+        var (exitCode, stdout, stderr) = await ReadParseOutputAsync(startInfo, token);
+        token.ThrowIfCancellationRequested();
+        if (exitCode != 0)
         {
             if (!string.IsNullOrWhiteSpace(stderr))
             {
