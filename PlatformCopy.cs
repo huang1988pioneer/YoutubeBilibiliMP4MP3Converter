@@ -4,6 +4,8 @@ namespace YoutubeOrBilibiliMP3Converter;
 
 internal static class PlatformCopy
 {
+    public const string ProductName = "YoutubeOrBilibiliMP3Converter";
+
     public static string DisplayVersion
     {
         get

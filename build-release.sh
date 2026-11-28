@@ -34,7 +34,7 @@ write_usage() {
   local dest="$1"
   local platform="$2"
   cat > "$dest" <<EOF
-影音轉換大師 ${VERSION}  (${platform})
+${NAME} ${VERSION}  (${platform})
 
 第一次使用前需要 yt-dlp 與 ffmpeg。程式首頁會顯示「安裝配套工具」指引，
 可按「一鍵安裝」（macOS / Windows），或自行執行：
@@ -115,7 +115,7 @@ package_dmg() {
   ln -s /Applications "$root/Applications"
   write_usage "$root/README.txt" "macOS"
   hdiutil create \
-    -volname "影音轉換大師 ${VERSION}" \
+    -volname "${NAME} ${VERSION}" \
     -srcfolder "$root" \
     -fs HFS+ \
     -format UDZO \

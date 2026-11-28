@@ -1,4 +1,4 @@
-# 影音轉換大師 v1.5.11
+# YoutubeOrBilibiliMP3Converter v1.5.12
 
 Avalonia 桌面應用：將 **YouTube** 或 **Bilibili** 影片網址轉換成 **MP4 / MP3**（本機使用 `yt-dlp` + `ffmpeg`）。
 
@@ -66,7 +66,7 @@ winget install yt-dlp.yt-dlp Gyan.FFmpeg
 
 5. 如果畫面問你是否同意，輸入 `Y`，再按 Enter。
 6. 等安裝完成後，關掉終端機。
-7. 重新開啟「影音轉換大師」，就可以開始使用。
+7. 重新開啟「YoutubeOrBilibiliMP3Converter」，就可以開始使用。
 
 如果 Windows 顯示找不到 `winget`，請先從 Microsoft Store 更新或安裝「應用程式安裝程式」。
 

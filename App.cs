@@ -9,7 +9,7 @@ public sealed class App : Application
 {
     public override void Initialize()
     {
-        Name = "影音轉換大師";
+        Name = PlatformCopy.ProductName;
         Styles.Add(new FluentTheme());
         RequestedThemeVariant = ThemeVariant.Default;
     }

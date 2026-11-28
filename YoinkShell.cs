@@ -1964,6 +1964,7 @@ public sealed partial class MainWindow
         var bar = new Grid
         {
             ColumnDefinitions = new ColumnDefinitions("*,Auto"),
+            RowDefinitions = new RowDefinitions("Auto,Auto"),
             MaxWidth = StageWidth,
             ColumnSpacing = 8
         };
@@ -1976,7 +1977,7 @@ public sealed partial class MainWindow
         brand.Children.Add(CreateAppIconView(32, 7));
         brand.Children.Add(new TextBlock
         {
-            Text = "影音轉換大師",
+            Text = PlatformCopy.ProductName,
             Foreground = palette.Primary,
             FontSize = 16,
             FontWeight = FontWeight.SemiBold,
@@ -1993,7 +1994,7 @@ public sealed partial class MainWindow
         };
         home.Click += (_, _) => LogoClicked();
         Avalonia.Automation.AutomationProperties.SetName(home,
-            _shellPhase is ShellPhase.Probing or ShellPhase.Downloading ? "取消目前作業" : "影音轉換大師首頁");
+            _shellPhase is ShellPhase.Probing or ShellPhase.Downloading ? "取消目前作業" : $"{PlatformCopy.ProductName} 首頁");
         bar.Children.Add(home);
 
         var actions = new StackPanel
@@ -2039,6 +2040,15 @@ public sealed partial class MainWindow
         actions.Children.Add(themeButton);
         Grid.SetColumn(actions, 1);
         bar.Children.Add(actions);
+        bar.SizeChanged += (_, e) =>
+        {
+            var compact = e.NewSize.Width < 520;
+            Grid.SetColumnSpan(home, compact ? 2 : 1);
+            Grid.SetColumn(actions, compact ? 0 : 1);
+            Grid.SetColumnSpan(actions, compact ? 2 : 1);
+            Grid.SetRow(actions, compact ? 1 : 0);
+            actions.HorizontalAlignment = compact ? HorizontalAlignment.Left : HorizontalAlignment.Right;
+        };
 
         return new Border
         {

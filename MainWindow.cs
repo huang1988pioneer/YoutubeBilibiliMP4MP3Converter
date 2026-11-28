@@ -175,7 +175,7 @@ public sealed partial class MainWindow : Window
 
         _shellTheme = ParseShellTheme(settings.Theme);
 
-        Title = $"\u5f71\u97f3\u8f49\u63db\u5927\u5e2b v{PlatformCopy.DisplayVersion}";
+        Title = $"{PlatformCopy.ProductName} v{PlatformCopy.DisplayVersion}";
         if (AppIconBitmap.Value is { } appIcon)
         {
             Icon = new WindowIcon(appIcon);
@@ -6190,7 +6190,7 @@ public sealed partial class MainWindow : Window
         {
             var text = File.ReadAllText(srtPath);
             var blocks = Regex.Split(text.Replace("\r\n", "\n"), @"\n\s*\n");
-            var lines = new List<string> { "[ti:]", "[ar:]", "[by:YoutubeBilibiliConverter]" };
+            var lines = new List<string> { "[ti:]", "[ar:]", $"[by:{PlatformCopy.ProductName}]" };
 
             foreach (var block in blocks)
             {
@@ -6962,7 +6962,7 @@ public sealed partial class MainWindow : Window
                 Process.Start(new ProcessStartInfo
                 {
                     FileName = "powershell.exe",
-                    Arguments = $"-NoExit -Command \"{command}; Write-Host ''; Write-Host '\u5b8c\u6210\u5f8c\u8acb\u95dc\u9589\u6b64\u8996\u7a97\uff0c\u56de\u5230\u5f71\u97f3\u8f49\u63db\u5927\u5e2b\u6309\u300c\u91cd\u65b0\u6aa2\u67e5\u300d\u3002'\"",
+                    Arguments = $"-NoExit -Command \"{command}; Write-Host ''; Write-Host '\u5b8c\u6210\u5f8c\u8acb\u95dc\u9589\u6b64\u8996\u7a97\uff0c\u56de\u5230{PlatformCopy.ProductName}\u6309\u300c\u91cd\u65b0\u6aa2\u67e5\u300d\u3002'\"",
                     UseShellExecute = true,
                     Verb = "runas"
                 });

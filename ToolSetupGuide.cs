@@ -67,10 +67,10 @@ internal static class ToolSetupGuide
 
     /// <summary>zsh script run in Terminal.app by the macOS one-click install.</summary>
     public static string BuildMacInstallScript() =>
-        """
+        $$"""
         #!/bin/zsh
         clear
-        echo "影音轉換大師：安裝配套工具 yt-dlp 與 ffmpeg"
+        echo "{{PlatformCopy.ProductName}}：安裝配套工具 yt-dlp 與 ffmpeg"
         echo ""
         load_brew() {
           for p in /opt/homebrew/bin/brew /usr/local/bin/brew; do
@@ -92,7 +92,7 @@ internal static class ToolSetupGuide
         echo "正在安裝 yt-dlp 與 ffmpeg，請稍候..."
         if brew install yt-dlp ffmpeg; then
           echo ""
-          echo "✅ 安裝完成！請回到「影音轉換大師」，程式會自動偵測。這個視窗可以關閉了。"
+          echo "✅ 安裝完成！請回到「{{PlatformCopy.ProductName}}」，程式會自動偵測。這個視窗可以關閉了。"
         else
           echo ""
           echo "❌ 安裝失敗，請把上面的訊息截圖回報。"
