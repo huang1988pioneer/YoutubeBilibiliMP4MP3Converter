@@ -8,7 +8,6 @@ using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
-using Avalonia.Platform;
 using Avalonia.Styling;
 using Avalonia.Threading;
 using IoPath = System.IO.Path;
@@ -50,28 +49,29 @@ public sealed partial class MainWindow
         public required IBrush Accent { get; init; }
         public required IBrush Soft { get; init; }
         public required IBrush Selection { get; init; }
+        public required IBrush Signal { get; init; }
+        public required IBrush GridLine { get; init; }
     }
 
     private sealed class FormatCard
     {
-        public required Border Root { get; init; }
+        public required Button Root { get; init; }
         public required Border Badge { get; init; }
         public required TextBlock BadgeText { get; init; }
         public required TextBlock Title { get; init; }
         public required TextBlock Detail { get; init; }
     }
 
-    private const double StageWidth = 640;
+    private const double StageWidth = 816;
 
     private static readonly string[] SpinFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
     private ShellPhase _shellPhase = ShellPhase.Input;
-    private ShellTheme _shellTheme = ShellTheme.Dark;
+    private ShellTheme _shellTheme = ShellTheme.Light;
     private Border? _shellCenter;
     private ScrollViewer? _shellScroll;
     private Border? _shellPreviewFrame;
     private Control? _shellLayoutRoot;
-    private Border? _shellLayoutStage;
     private bool _fittingWindow;
     private TextBox? _shellUrlBox;
     private TextBox? _shellSearchBox;
@@ -115,8 +115,7 @@ public sealed partial class MainWindow
         {
             HorizontalAlignment = HorizontalAlignment.Stretch,
             VerticalAlignment = VerticalAlignment.Stretch,
-            Padding = new Thickness(0),
-            MinHeight = Height > 0 ? Height : 700
+            Padding = new Thickness(0)
         };
         _shellScroll = new ScrollViewer
         {
@@ -128,13 +127,6 @@ public sealed partial class MainWindow
         var scroll = _shellScroll;
 
         AddHandler(KeyDownEvent, OnShellKeyDown, RoutingStrategies.Tunnel);
-        SizeChanged += (_, e) =>
-        {
-            if (_shellCenter is not null)
-            {
-                _shellCenter.MinHeight = Math.Max(0, e.NewSize.Height);
-            }
-        };
         ActualThemeVariantChanged += (_, _) =>
         {
             if (_shellTheme == ShellTheme.Auto && !_shellRendering)
@@ -202,9 +194,9 @@ public sealed partial class MainWindow
 
             var page = new StackPanel
             {
-                Width = StageWidth,
-                HorizontalAlignment = HorizontalAlignment.Center,
-                VerticalAlignment = VerticalAlignment.Center,
+                MaxWidth = StageWidth,
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+                VerticalAlignment = VerticalAlignment.Top,
                 Spacing = 0
             };
 
@@ -236,24 +228,17 @@ public sealed partial class MainWindow
                     break;
             }
 
-            if (_shellPhase is ShellPhase.Picking or ShellPhase.History or ShellPhase.Settings)
-            {
-                page.VerticalAlignment = VerticalAlignment.Top;
-                page.Margin = new Thickness(0, 8, 0, 0);
-            }
-
             var stage = new Border
             {
                 HorizontalAlignment = HorizontalAlignment.Stretch,
                 MinHeight = 0,
-                Padding = new Thickness(32, 8, 32, 20),
+                Padding = new Thickness(20, 28, 20, 28),
                 Child = page
             };
             root.Children.Add(stage);
             _shellCenter!.Child = root;
             _shellLayoutRoot = root;
-            _shellLayoutStage = stage;
-            FitWindowToContent(root, stage);
+            FitWindowToContent(root);
 
             Dispatcher.UIThread.Post(() =>
             {
@@ -294,40 +279,44 @@ public sealed partial class MainWindow
     private ShellPalette CurrentPalette() => ShellIsDark()
         ? new ShellPalette
         {
-            Background = Brush.Parse("#101418"),
-            Surface = Brush.Parse("#1A2228"),
-            Primary = Brush.Parse("#F3F6F4"),
-            Gray = Brush.Parse("#9AABA8"),
-            Line = Brush.Parse("#2C3A40"),
-            ButtonFill = Brush.Parse("#1FA7A0"),
-            ButtonText = Brush.Parse("#06201E"),
-            Track = Brush.Parse("#243036"),
-            Warn = Brush.Parse("#E2B15A"),
-            Accent = Brush.Parse("#3DCFC6"),
-            Soft = Brush.Parse("#163430"),
-            Selection = Brush.Parse("#663DCFC6")
+            Background = Brush.Parse("#111A2C"),
+            Surface = Brush.Parse("#1A263B"),
+            Primary = Brush.Parse("#EDF3FF"),
+            Gray = Brush.Parse("#B0BFD5"),
+            Line = Brush.Parse("#394962"),
+            ButtonFill = Brush.Parse("#AAC6FF"),
+            ButtonText = Brush.Parse("#102449"),
+            Track = Brush.Parse("#2C3C57"),
+            Warn = Brush.Parse("#FFD390"),
+            Accent = Brush.Parse("#AAC6FF"),
+            Soft = Brush.Parse("#233651"),
+            Selection = Brush.Parse("#668CAFFF"),
+            Signal = Brush.Parse("#62CECD"),
+            GridLine = Brush.Parse("#394F6C")
         }
         : new ShellPalette
         {
-            Background = Brush.Parse("#F3F6F5"),
+            Background = Brush.Parse("#F4F7FC"),
             Surface = Brush.Parse("#FFFFFF"),
-            Primary = Brush.Parse("#14211F"),
-            Gray = Brush.Parse("#5E726F"),
-            Line = Brush.Parse("#D5E2DF"),
-            ButtonFill = Brush.Parse("#0E8F88"),
+            Primary = Brush.Parse("#172B4D"),
+            Gray = Brush.Parse("#516580"),
+            Line = Brush.Parse("#CEDAE9"),
+            ButtonFill = Brush.Parse("#2855CA"),
             ButtonText = Brush.Parse("#FFFFFF"),
-            Track = Brush.Parse("#E5F3F1"),
-            Warn = Brush.Parse("#8A5A00"),
-            Accent = Brush.Parse("#0E8F88"),
-            Soft = Brush.Parse("#E7F7F5"),
-            Selection = Brush.Parse("#6614B8A6")
+            Track = Brush.Parse("#DFE8F6"),
+            Warn = Brush.Parse("#924516"),
+            Accent = Brush.Parse("#2855CA"),
+            Soft = Brush.Parse("#E7F0FE"),
+            Selection = Brush.Parse("#664981F0"),
+            Signal = Brush.Parse("#087F89"),
+            GridLine = Brush.Parse("#CBDBF1")
         };
 
     private ShellTheme ParseShellTheme(string? theme) => theme?.Trim().ToLowerInvariant() switch
     {
-        "light" => ShellTheme.Light,
+        "dark" => ShellTheme.Dark,
         "auto" => ShellTheme.Auto,
-        _ => ShellTheme.Dark
+        _ => ShellTheme.Light
     };
 
     private string ThemeLabel() => _shellTheme switch
@@ -351,46 +340,46 @@ public sealed partial class MainWindow
 
     private void BuildInput(StackPanel page, ShellPalette palette)
     {
-        page.Children.Add(Eyebrow("本機轉檔", palette));
-        page.Children.Add(Gap(10));
-        page.Children.Add(new TextBlock
+        page.Children.Add(BuildInputBanner(palette));
+        page.Children.Add(Gap(18));
+
+        var editor = new StackPanel { Spacing = 12 };
+        var heading = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), ColumnSpacing = 12 };
+        heading.Children.Add(new TextBlock
         {
-            Text = "貼上影片連結",
+            Text = "影片連結",
+            FontSize = 20,
+            FontWeight = FontWeight.SemiBold,
             Foreground = palette.Primary,
-            FontSize = 34,
-            FontWeight = FontWeight.SemiBold
+            VerticalAlignment = VerticalAlignment.Center
         });
-        page.Children.Add(Gap(8));
-        page.Children.Add(new TextBlock
-        {
-            Text = "多個網址可用空格或換行分隔，也可分次按「貼上」追加。選一次格式，即可依序轉檔。",
-            Foreground = palette.Gray,
-            FontSize = 15,
-            TextWrapping = TextWrapping.Wrap,
-            LineHeight = 22
-        });
-        page.Children.Add(Gap(16));
-        page.Children.Add(PlatformPills(palette));
-        page.Children.Add(Gap(22));
+        var paste = GhostButton(palette, "貼上", () => _ = PasteClipboardIntoUrlAsync());
+        Grid.SetColumn(paste, 1);
+        heading.Children.Add(paste);
+        editor.Children.Add(heading);
 
         var box = new TextBox
         {
             Text = _shellDraft,
-            PlaceholderText = "貼上影片網址，Shift + Enter 換行",
+            PlaceholderText = "貼上 YouTube 或 Bilibili 網址…",
+            PlaceholderForeground = palette.Gray,
             AcceptsReturn = true,
             TextWrapping = TextWrapping.Wrap,
+            MinHeight = 86,
             MaxHeight = 150,
-            Background = Brushes.Transparent,
-            BorderThickness = new Thickness(0),
+            Background = palette.Background,
+            BorderBrush = palette.Line,
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(8),
             Foreground = palette.Primary,
             CaretBrush = palette.Accent,
             SelectionBrush = palette.Selection,
             FontSize = 15,
-            Padding = new Thickness(0, 2),
-            MinHeight = 58,
-            VerticalAlignment = VerticalAlignment.Center,
-            HorizontalAlignment = HorizontalAlignment.Stretch
+            Padding = new Thickness(12, 10),
+            VerticalContentAlignment = VerticalAlignment.Top
         };
+        Avalonia.Automation.AutomationProperties.SetName(box, "影片連結");
+        editor.Children.Add(box);
         var submit = PrimaryButton(palette, "查看格式", () => _ = SubmitShellUrlAsync());
         void UpdateCount()
         {
@@ -401,6 +390,11 @@ public sealed partial class MainWindow
         box.TextChanged += (_, _) =>
         {
             UpdateCount();
+            if (_shellHintText is not null && !string.Equals(_shellDraft, box.Text, StringComparison.Ordinal))
+            {
+                _shellWarning = null;
+                _shellHintText.IsVisible = false;
+            }
             if (_shellRecallSilent)
             {
                 return;
@@ -410,9 +404,18 @@ public sealed partial class MainWindow
             _shellRecallIndex = -1;
         };
         _shellUrlBox = box;
-        page.Children.Add(UrlField(palette, box));
-        page.Children.Add(Gap(14));
-        page.Children.Add(submit);
+        var actions = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), ColumnSpacing = 12 };
+        actions.Children.Add(new TextBlock
+        {
+            Text = "多個網址可用空格或換行分隔。Shift + Enter 換行。",
+            Foreground = palette.Gray,
+            FontSize = 13,
+            TextWrapping = TextWrapping.Wrap,
+            VerticalAlignment = VerticalAlignment.Center
+        });
+        Grid.SetColumn(submit, 1);
+        actions.Children.Add(submit);
+        editor.Children.Add(actions);
 
         _shellHintText = new TextBlock
         {
@@ -420,11 +423,12 @@ public sealed partial class MainWindow
             Foreground = string.IsNullOrEmpty(_shellWarning) ? palette.Gray : palette.Warn,
             FontSize = 13,
             TextWrapping = TextWrapping.Wrap,
-            MinHeight = 20,
-            Margin = new Thickness(4, 12, 0, 0),
-            Opacity = string.IsNullOrEmpty(_shellWarning) ? 0 : 1
+            IsVisible = !string.IsNullOrEmpty(_shellWarning)
         };
-        page.Children.Add(_shellHintText);
+        editor.Children.Add(_shellHintText);
+        page.Children.Add(SurfaceCard(palette, editor));
+        page.Children.Add(Gap(14));
+        page.Children.Add(BuildOutputLocation(palette));
 
         if (_toolsMissing)
         {
@@ -557,7 +561,7 @@ public sealed partial class MainWindow
         {
             Width = 52,
             Height = 36,
-            CornerRadius = new CornerRadius(12),
+            CornerRadius = new CornerRadius(6),
             Child = badgeText
         };
         var title = new TextBlock
@@ -588,13 +592,16 @@ public sealed partial class MainWindow
         grid.Children.Add(badge);
         Grid.SetColumn(copy, 1);
         grid.Children.Add(copy);
-        var row = new Border
+        var row = new Button
         {
-            CornerRadius = new CornerRadius(18),
-            Padding = new Thickness(8, 6),
+            CornerRadius = new CornerRadius(9),
+            Padding = new Thickness(10, 8),
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            HorizontalContentAlignment = HorizontalAlignment.Stretch,
             Cursor = new Cursor(StandardCursorType.Hand),
-            Child = grid
+            Content = grid
         };
+        Avalonia.Automation.AutomationProperties.SetName(row, _formatChoices[index].Label);
         _formatCards.Add(new FormatCard
         {
             Root = row,
@@ -624,12 +631,17 @@ public sealed partial class MainWindow
             _formatHover = -1;
             PaintFormatRows();
         };
-        row.PointerPressed += (_, e) =>
+        row.GotFocus += (_, _) =>
         {
             _formatIndex = captured;
             _formatHover = -1;
             PaintFormatRows();
-            e.Handled = true;
+        };
+        row.Click += (_, _) =>
+        {
+            _formatIndex = captured;
+            _formatHover = -1;
+            PaintFormatRows();
             _ = DownloadCurrentChoiceAsync();
         };
         return row;
@@ -640,17 +652,16 @@ public sealed partial class MainWindow
         var palette = CurrentPalette();
         for (var index = 0; index < _formatCards.Count && index < _formatChoices.Count; index++)
         {
-            var active = _formatHover >= 0 ? _formatHover : _formatIndex;
-            var selected = index == active;
+            var selected = index == _formatIndex;
             var choice = _formatChoices[index];
             var card = _formatCards[index];
             var (badge, title, detail) = DescribeChoice(choice);
             card.BadgeText.Text = badge;
             card.Title.Text = title;
             card.Detail.Text = detail;
-            card.Root.Background = selected ? palette.Soft : palette.Surface;
+            card.Root.Background = selected || index == _formatHover ? palette.Soft : palette.Surface;
             card.Root.BorderBrush = selected ? palette.Accent : palette.Line;
-            card.Root.BorderThickness = new Thickness(selected ? 2 : 1);
+            card.Root.BorderThickness = new Thickness(1);
             card.Badge.Background = selected ? palette.Accent : palette.Track;
             card.BadgeText.Foreground = selected ? palette.ButtonText : palette.Primary;
         }
@@ -824,10 +835,9 @@ public sealed partial class MainWindow
     private void BuildHistory(StackPanel page, ShellPalette palette)
     {
         var body = new StackPanel { Spacing = 8 };
-        body.Children.Add(Eyebrow("紀錄", palette));
         body.Children.Add(new TextBlock
         {
-            Text = "之前轉過的檔案",
+            Text = "轉換紀錄",
             Foreground = palette.Primary,
             FontSize = 24,
             FontWeight = FontWeight.SemiBold,
@@ -875,16 +885,15 @@ public sealed partial class MainWindow
             Margin = new Thickness(0, 8, 0, 0)
         };
         body.Children.Add(_shellStatusLine);
-        page.Children.Add(body);
+        page.Children.Add(SurfaceCard(palette, body));
     }
 
     private void BuildSettings(StackPanel page, ShellPalette palette)
     {
         var body = new StackPanel { Spacing = 14 };
-        body.Children.Add(Eyebrow("設定", palette));
         body.Children.Add(new TextBlock
         {
-            Text = "儲存與搜尋",
+            Text = "儲存與搜尋設定",
             Foreground = palette.Primary,
             FontSize = 24,
             FontWeight = FontWeight.SemiBold,
@@ -1031,7 +1040,7 @@ public sealed partial class MainWindow
             TextWrapping = TextWrapping.Wrap
         };
         body.Children.Add(_shellStatusLine);
-        page.Children.Add(body);
+        page.Children.Add(SurfaceCard(palette, body));
     }
 
     private Control BuildToolBanner(ShellPalette palette)
@@ -1061,19 +1070,14 @@ public sealed partial class MainWindow
             FontSize = 12,
             TextWrapping = TextWrapping.Wrap
         });
-        var buttons = new StackPanel
-        {
-            Orientation = Orientation.Horizontal,
-            HorizontalAlignment = HorizontalAlignment.Left,
-            Spacing = 8
-        };
+        var buttons = new WrapPanel { ItemSpacing = 8, LineSpacing = 8 };
         if (ToolSetupGuide.SupportsOneClickInstall(os))
         {
-            buttons.Children.Add(OutlineButton(palette, "一鍵安裝", LaunchToolInstaller));
+            buttons.Children.Add(GhostButton(palette, "一鍵安裝", LaunchToolInstaller));
         }
 
-        buttons.Children.Add(OutlineButton(palette, "複製指令", () => _ = CopyInstallCommandAsync()));
-        buttons.Children.Add(OutlineButton(palette, "重新檢查", () => RefreshToolSetup()));
+        buttons.Children.Add(GhostButton(palette, "複製指令", () => _ = CopyInstallCommandAsync()));
+        buttons.Children.Add(GhostButton(palette, "重新檢查", () => RefreshToolSetup()));
         stack.Children.Add(buttons);
         return SurfaceCard(palette, stack);
     }
@@ -1105,7 +1109,7 @@ public sealed partial class MainWindow
                     _ = SubmitShellUrlAsync();
                 e.Handled = true;
                 break;
-            case ShellPhase.Input when e.Key == Key.Tab
+            case ShellPhase.Input when e.Key == Key.Tab && e.KeyModifiers == KeyModifiers.None && _shellUrlBox?.IsFocused == true
                 && !string.IsNullOrEmpty(_shellClipboardUrl)
                 && string.IsNullOrWhiteSpace(_shellUrlBox?.Text):
                 AcceptClipboardUrl();
@@ -1132,11 +1136,11 @@ public sealed partial class MainWindow
                 CancelShellActivity();
                 e.Handled = true;
                 break;
-            case ShellPhase.Done when e.Key == Key.Enter:
+            case ShellPhase.Done when e.Key == Key.Enter && e.Source is not Button:
                 ShowInput(clear: true);
                 e.Handled = true;
                 break;
-            case ShellPhase.Error when e.Key == Key.Enter:
+            case ShellPhase.Error when e.Key == Key.Enter && e.Source is not Button:
                 ShowInput(clear: false);
                 e.Handled = true;
                 break;
@@ -1169,7 +1173,7 @@ public sealed partial class MainWindow
             return;
         }
 
-        if (e.Key == Key.Enter)
+        if (e.Key == Key.Enter && e.Source is not Button)
         {
             e.Handled = true;
             _ = DownloadCurrentChoiceAsync();
@@ -1198,8 +1202,7 @@ public sealed partial class MainWindow
         };
         if (index >= 0 && index < _formatChoices.Count)
         {
-            _formatIndex = index;
-            PaintFormatRows();
+            SelectFormat(index);
             e.Handled = true;
         }
     }
@@ -1415,7 +1418,7 @@ public sealed partial class MainWindow
 
         _shellHintText.Text = "剪貼簿裡有網址，可以按 Tab 貼上";
         _shellHintText.Foreground = CurrentPalette().Gray;
-        _shellHintText.Opacity = 1;
+        _shellHintText.IsVisible = true;
     }
 
     private async Task CopyInstallCommandAsync()
@@ -1462,7 +1465,7 @@ public sealed partial class MainWindow
         {
             _shellHintText.Text = "已貼上剪貼簿的網址";
             _shellHintText.Foreground = CurrentPalette().Gray;
-            _shellHintText.Opacity = 1;
+            _shellHintText.IsVisible = true;
         }
     }
 
@@ -1515,7 +1518,17 @@ public sealed partial class MainWindow
             return;
         }
 
-        _formatIndex = (_formatIndex + delta + _formatChoices.Count) % _formatChoices.Count;
+        SelectFormat((_formatIndex + delta + _formatChoices.Count) % _formatChoices.Count);
+    }
+
+    private void SelectFormat(int index)
+    {
+        _formatIndex = index;
+        if (_formatCards.Any(card => card.Root.IsFocused))
+        {
+            _formatCards[_formatIndex].Root.Focus();
+        }
+        _formatCards[_formatIndex].Root.BringIntoView();
         PaintFormatRows();
     }
 
@@ -1699,7 +1712,7 @@ public sealed partial class MainWindow
         return Math.Max(MinHeight, screen.WorkingArea.Height / screen.Scaling - 64);
     }
 
-    private void FitWindowToContent(Control root, Border stage)
+    private void FitWindowToContent(Control root)
     {
         if (_fittingWindow)
         {
@@ -1733,11 +1746,6 @@ public sealed partial class MainWindow
         }
 
         var target = Math.Clamp(Math.Max(desired + 2, 700), MinHeight, limit);
-        if (target > desired)
-        {
-            stage.MinHeight = stage.DesiredSize.Height + (target - desired);
-        }
-
         _fittingWindow = true;
         try
         {
@@ -1800,9 +1808,9 @@ public sealed partial class MainWindow
                     _shellPreviewFrame.Height = ThumbnailHeight(bitmap);
                 }
 
-                if (_shellLayoutRoot is not null && _shellLayoutStage is not null)
+                if (_shellLayoutRoot is not null)
                 {
-                    FitWindowToContent(_shellLayoutRoot, _shellLayoutStage);
+                    FitWindowToContent(_shellLayoutRoot);
                 }
             });
         }
@@ -1829,18 +1837,6 @@ public sealed partial class MainWindow
             Foreground = palette.Warn,
             FontSize = 12,
             FontWeight = FontWeight.SemiBold
-        }
-    };
-
-    private LinearGradientBrush AccentGradient() => new()
-    {
-        StartPoint = new RelativePoint(0, 0, RelativeUnit.Relative),
-        EndPoint = new RelativePoint(1, 0, RelativeUnit.Relative),
-        GradientStops =
-        {
-            new GradientStop(Color.Parse(ShellIsDark() ? "#0E8F88" : "#0B7C76"), 0),
-            new GradientStop(Color.Parse(ShellIsDark() ? "#3DCFC6" : "#14B8A6"), 0.55),
-            new GradientStop(Color.Parse(ShellIsDark() ? "#7AA2FF" : "#3B6FE0"), 1)
         }
     };
 
@@ -1968,135 +1964,89 @@ public sealed partial class MainWindow
         var bar = new Grid
         {
             ColumnDefinitions = new ColumnDefinitions("*,Auto"),
-            Margin = new Thickness(28, 18, 28, 0)
+            MaxWidth = StageWidth,
+            ColumnSpacing = 8
         };
         var brand = new StackPanel
         {
             Orientation = Orientation.Horizontal,
-            Spacing = 12,
-            VerticalAlignment = VerticalAlignment.Center,
-            Cursor = new Cursor(StandardCursorType.Hand)
+            Spacing = 9,
+            VerticalAlignment = VerticalAlignment.Center
         };
-        brand.Children.Add(BuildMark(palette));
-        var titles = new StackPanel { VerticalAlignment = VerticalAlignment.Center, Spacing = 1 };
-        titles.Children.Add(new TextBlock
+        brand.Children.Add(CreateAppIconView(32, 7));
+        brand.Children.Add(new TextBlock
         {
             Text = "影音轉換大師",
             Foreground = palette.Primary,
             FontSize = 16,
-            FontWeight = FontWeight.SemiBold
+            FontWeight = FontWeight.SemiBold,
+            VerticalAlignment = VerticalAlignment.Center
         });
-        titles.Children.Add(new TextBlock
+        var home = new Button
         {
-            Text = "YouTube 與 Bilibili",
-            Foreground = palette.Gray,
-            FontSize = 12
-        });
-        brand.Children.Add(titles);
-        brand.PointerPressed += (_, e) =>
-        {
-            LogoClicked();
-            e.Handled = true;
+            Content = brand,
+            Padding = new Thickness(2, 4),
+            HorizontalAlignment = HorizontalAlignment.Left,
+            Background = Brushes.Transparent,
+            BorderThickness = new Thickness(0),
+            Cursor = new Cursor(StandardCursorType.Hand)
         };
-        bar.Children.Add(brand);
+        home.Click += (_, _) => LogoClicked();
+        Avalonia.Automation.AutomationProperties.SetName(home,
+            _shellPhase is ShellPhase.Probing or ShellPhase.Downloading ? "取消目前作業" : "影音轉換大師首頁");
+        bar.Children.Add(home);
 
         var actions = new StackPanel
         {
             Orientation = Orientation.Horizontal,
-            Spacing = 8,
+            Spacing = 5,
             VerticalAlignment = VerticalAlignment.Center
         };
+        Button NavButton(string label, string icon, Action action)
+        {
+            var button = GhostButton(palette, label, action);
+            var content = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 5 };
+            content.Children.Add(VectorIcon((icon, null), palette.Gray, 16));
+            content.Children.Add(new TextBlock { Text = label, VerticalAlignment = VerticalAlignment.Center });
+            button.Content = content;
+            button.Padding = new Thickness(8, 7);
+            button.BorderThickness = new Thickness(0);
+            Avalonia.Automation.AutomationProperties.SetName(button, label);
+            return button;
+        }
+        var settingsIcon = "M3,8 H8 M14,8 H21 M11,5 A3,3 0 1 1 11,11 A3,3 0 1 1 11,5 Z M3,16 H11 M17,16 H21 M14,13 A3,3 0 1 1 14,19 A3,3 0 1 1 14,13 Z";
         if (_shellPhase is ShellPhase.Probing or ShellPhase.Downloading)
         {
-            actions.Children.Add(GhostButton(palette, "取消", CancelShellActivity));
+            actions.Children.Add(NavButton("取消", "M6,6 L18,18 M18,6 L6,18", CancelShellActivity));
         }
         else if (_shellPhase is ShellPhase.History or ShellPhase.Settings or ShellPhase.Picking or ShellPhase.Done or ShellPhase.Error)
         {
-            actions.Children.Add(GhostButton(palette, "回首頁", () => ShowInput(clear: false)));
+            actions.Children.Add(NavButton("回首頁", "M10,5 L3,12 L10,19 M4,12 H21", () => ShowInput(clear: false)));
             if (_shellPhase != ShellPhase.Settings)
             {
-                actions.Children.Add(GhostButton(palette, "設定", ShowSettings));
+                actions.Children.Add(NavButton("設定", settingsIcon, ShowSettings));
             }
         }
         else
         {
-            actions.Children.Add(GhostButton(palette, "紀錄", ShowHistory));
-            actions.Children.Add(GhostButton(palette, "設定", ShowSettings));
+            actions.Children.Add(NavButton("紀錄", "M3,5 V10 H8 M3.5,10 A8.5,8.5 0 1 1 4,16 M12,7 V12 L16,14", ShowHistory));
+            actions.Children.Add(NavButton("設定", settingsIcon, ShowSettings));
         }
 
-        actions.Children.Add(GhostButton(palette, ThemeLabel(), CycleShellTheme));
+        var themeButton = GhostButton(palette, ThemeLabel(), CycleShellTheme);
+        themeButton.Background = palette.Soft;
+        ToolTip.SetTip(themeButton, "切換淺色、深色或跟隨系統");
+        actions.Children.Add(themeButton);
         Grid.SetColumn(actions, 1);
         bar.Children.Add(actions);
 
-        var wrap = new StackPanel { Spacing = 14 };
-        wrap.Children.Add(bar);
-        wrap.Children.Add(new Border
-        {
-            Height = 3,
-            Background = AccentGradient()
-        });
-        return wrap;
-    }
-
-    private Control BuildMark(ShellPalette palette)
-    {
-        try
-        {
-            using var stream = AssetLoader.Open(new Uri("avares://YoutubeOrBilibiliMP3Converter/Assets/app-icon.png"));
-            var bitmap = new Bitmap(stream);
-            return new Border
-            {
-                Width = 36,
-                Height = 36,
-                CornerRadius = new CornerRadius(10),
-                ClipToBounds = true,
-                Child = new Image
-                {
-                    Source = bitmap,
-                    Width = 36,
-                    Height = 36,
-                    Stretch = Stretch.UniformToFill
-                }
-            };
-        }
-        catch
-        {
-            return new Border
-            {
-                Width = 36,
-                Height = 36,
-                CornerRadius = new CornerRadius(10),
-                Background = palette.Accent,
-                Child = new TextBlock
-                {
-                    Text = "影",
-                    Foreground = palette.ButtonText,
-                    FontSize = 16,
-                    FontWeight = FontWeight.Bold,
-                    HorizontalAlignment = HorizontalAlignment.Center,
-                    VerticalAlignment = VerticalAlignment.Center
-                }
-            };
-        }
-    }
-
-    private Control UrlField(ShellPalette palette, TextBox box)
-    {
-        var paste = GhostButton(palette, "貼上", () => _ = PasteClipboardIntoUrlAsync());
-        paste.VerticalAlignment = VerticalAlignment.Center;
-        var grid = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto") };
-        grid.Children.Add(box);
-        Grid.SetColumn(paste, 1);
-        grid.Children.Add(paste);
         return new Border
         {
             Background = palette.Surface,
             BorderBrush = palette.Line,
-            BorderThickness = new Thickness(1),
-            CornerRadius = new CornerRadius(18),
-            Padding = new Thickness(16, 8, 8, 8),
-            MinHeight = 58,
-            Child = grid
+            BorderThickness = new Thickness(0, 0, 0, 1),
+            Padding = new Thickness(16, 12),
+            Child = bar
         };
     }
 
@@ -2145,7 +2095,7 @@ public sealed partial class MainWindow
             Foreground = palette.ButtonText,
             Background = palette.ButtonFill,
             BorderThickness = new Thickness(0),
-            CornerRadius = new CornerRadius(16),
+            CornerRadius = new CornerRadius(8),
             FontSize = 15,
             FontWeight = FontWeight.SemiBold,
             Padding = new Thickness(22, 12),
@@ -2163,38 +2113,90 @@ public sealed partial class MainWindow
         Background = palette.Surface,
         BorderBrush = palette.Line,
         BorderThickness = new Thickness(1),
-        CornerRadius = new CornerRadius(22),
+        CornerRadius = new CornerRadius(12),
         Padding = new Thickness(22, 20),
         Child = child
     };
 
-    private Control PlatformPills(ShellPalette palette)
+    private static Control BuildInputBanner(ShellPalette palette)
     {
-        var row = new StackPanel
+        var copy = new StackPanel { Spacing = 8, VerticalAlignment = VerticalAlignment.Center };
+        copy.Children.Add(new TextBlock
         {
-            Orientation = Orientation.Horizontal,
-            Spacing = 8
+            Text = "影音轉換工作台",
+            FontSize = 32,
+            FontWeight = FontWeight.Bold,
+            Foreground = palette.Primary,
+            TextWrapping = TextWrapping.Wrap
+        });
+        copy.Children.Add(new TextBlock
+        {
+            Text = "將 YouTube 或 Bilibili 連結轉成 MP4 影片或 MP3 音訊。",
+            FontSize = 15,
+            Foreground = palette.Gray,
+            TextWrapping = TextWrapping.Wrap
+        });
+
+        var diagram = new Viewbox
+        {
+            MaxWidth = 272,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            IsHitTestVisible = false,
+            Child = new MediaSignalDiagram(palette.GridLine, palette.Accent, palette.Signal, palette.Surface)
+            {
+                Width = 272,
+                Height = 132
+            }
         };
-        row.Children.Add(Pill(palette, "YouTube"));
-        row.Children.Add(Pill(palette, "Bilibili"));
-        return row;
+        var grid = new Grid
+        {
+            ColumnDefinitions = new ColumnDefinitions("3*,2*"),
+            ColumnSpacing = 12,
+            MinHeight = 108
+        };
+        grid.Children.Add(copy);
+        Grid.SetColumn(diagram, 1);
+        grid.Children.Add(diagram);
+        grid.SizeChanged += (_, e) =>
+        {
+            var wide = e.NewSize.Width >= 495;
+            diagram.IsVisible = wide;
+            Grid.SetColumnSpan(copy, wide ? 1 : 2);
+        };
+        return new Border
+        {
+            Background = palette.Soft,
+            BorderBrush = palette.GridLine,
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(12),
+            Padding = new Thickness(24, 12),
+            Child = grid
+        };
     }
 
-    private static Border Pill(ShellPalette palette, string text) => new()
+    private Control BuildOutputLocation(ShellPalette palette)
     {
-        Background = palette.Surface,
-        BorderBrush = palette.Line,
-        BorderThickness = new Thickness(1),
-        CornerRadius = new CornerRadius(999),
-        Padding = new Thickness(12, 5),
-        Child = new TextBlock
+        var path = _outputBox.Text ?? "";
+        var details = new StackPanel { Spacing = 3, VerticalAlignment = VerticalAlignment.Center };
+        details.Children.Add(SectionLabel("輸出資料夾", palette));
+        details.Children.Add(new TextBlock
         {
-            Text = text,
+            Text = ShortenHome(path),
             Foreground = palette.Primary,
-            FontSize = 12,
-            FontWeight = FontWeight.SemiBold
-        }
-    };
+            FontSize = 14,
+            TextTrimming = TextTrimming.CharacterEllipsis
+        });
+        ToolTip.SetTip(details, path);
+        var folderIcon = VectorIcon(("M3,7 V5 H10 L12,7 H21 V19 H3 Z", null), palette.Accent, 20);
+        var grid = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto"), ColumnSpacing = 12 };
+        grid.Children.Add(folderIcon);
+        Grid.SetColumn(details, 1);
+        grid.Children.Add(details);
+        var change = GhostButton(palette, "變更", () => ChooseFolderAsync(this, new RoutedEventArgs()));
+        Grid.SetColumn(change, 2);
+        grid.Children.Add(change);
+        return new Border { Padding = new Thickness(10, 4), Child = grid };
+    }
 
     private static TextBlock Eyebrow(string text, ShellPalette palette) => new()
     {
@@ -2251,8 +2253,9 @@ public sealed partial class MainWindow
             Background = palette.Surface,
             BorderBrush = palette.Line,
             BorderThickness = new Thickness(1),
-            CornerRadius = new CornerRadius(999),
-            Padding = new Thickness(14, 8),
+            CornerRadius = new CornerRadius(7),
+            VerticalAlignment = VerticalAlignment.Center,
+            Padding = new Thickness(11, 7),
             FontSize = 13,
             Cursor = new Cursor(StandardCursorType.Hand)
         };
@@ -2260,40 +2263,11 @@ public sealed partial class MainWindow
         return button;
     }
 
-    private Control OutlineButton(ShellPalette palette, string text, Action onClick)
-    {
-        var label = new TextBlock
-        {
-            Text = text,
-            Foreground = palette.Primary,
-            FontSize = 14,
-            FontWeight = FontWeight.Bold,
-            HorizontalAlignment = HorizontalAlignment.Center
-        };
-        var border = new Border
-        {
-            Background = palette.Surface,
-            BorderBrush = palette.Line,
-            BorderThickness = new Thickness(1),
-            CornerRadius = new CornerRadius(999),
-            Padding = new Thickness(16, 10),
-            HorizontalAlignment = HorizontalAlignment.Center,
-            Cursor = new Cursor(StandardCursorType.Hand),
-            Child = label
-        };
-        border.PointerPressed += (_, e) =>
-        {
-            onClick();
-            e.Handled = true;
-        };
-        return border;
-    }
-
     private CheckBox BindCheck(ShellPalette palette, string label, bool value, Action<bool> onChanged)
     {
         var box = new CheckBox
         {
-            Content = label,
+            Content = new TextBlock { Text = label, TextWrapping = TextWrapping.Wrap },
             IsChecked = value,
             Foreground = palette.Primary,
             FontSize = 14
@@ -2324,21 +2298,20 @@ public sealed partial class MainWindow
             });
         }
 
-        var row = new Border
+        var row = new Button
         {
             Background = palette.Background,
             BorderBrush = palette.Line,
             BorderThickness = new Thickness(1),
-            CornerRadius = new CornerRadius(14),
+            CornerRadius = new CornerRadius(8),
             Padding = new Thickness(12, 10),
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            HorizontalContentAlignment = HorizontalAlignment.Stretch,
             Cursor = new Cursor(StandardCursorType.Hand),
-            Child = stack
+            Content = stack
         };
-        row.PointerPressed += (_, e) =>
-        {
-            onClick();
-            e.Handled = true;
-        };
+        Avalonia.Automation.AutomationProperties.SetName(row, title);
+        row.Click += (_, _) => onClick();
         return row;
     }
 

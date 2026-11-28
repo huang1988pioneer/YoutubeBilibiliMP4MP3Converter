@@ -182,9 +182,8 @@ public sealed partial class MainWindow : Window
         }
         Width = 1040;
         Height = 700;
-        MinWidth = 880;
-        MinHeight = 600;
-        Background = Brush.Parse("#101418");
+        MinWidth = 420;
+        MinHeight = 420;
         FontFamily = new FontFamily(PlatformCopy.UiFontFamily);
 
         _urlBox = CreateInputBox("https://www.youtube.com/watch?v=... \u6216 Bilibili \u5f71\u7247\u7db2\u5740");
